@@ -12,6 +12,7 @@ import {
   postJson,
   providerFromBody,
   readUpstreamJson,
+  toPreviewImageUrls,
   toPositiveInt,
 } from "../../lib/chat-image-proxy";
 
@@ -39,6 +40,32 @@ function normalizeB64Json(value: unknown) {
   return value === true || String(value).trim().toLowerCase() === "true";
 }
 
+function optionalString(value: unknown) {
+  return String(value == null ? "" : value).trim();
+}
+
+function addOptionalPayloadParams(payload: Record<string, unknown>, body: Record<string, unknown>) {
+  const background = optionalString(body.background);
+  const outputFormat = optionalString(body.output_format || body.outputFormat);
+  const moderation = optionalString(body.moderation);
+  const outputCompression = Number(body.output_compression || body.outputCompression);
+  if (background) payload.background = background;
+  if (outputFormat) payload.output_format = outputFormat;
+  if (moderation) payload.moderation = moderation;
+  if (Number.isFinite(outputCompression)) payload.output_compression = Math.max(0, Math.min(100, Math.round(outputCompression)));
+}
+
+function addOptionalFormParams(form: FormData, body: Record<string, unknown>) {
+  const background = optionalString(body.background);
+  const outputFormat = optionalString(body.output_format || body.outputFormat);
+  const moderation = optionalString(body.moderation);
+  const outputCompression = Number(body.output_compression || body.outputCompression);
+  if (background) form.set("background", background);
+  if (outputFormat) form.set("output_format", outputFormat);
+  if (moderation) form.set("moderation", moderation);
+  if (Number.isFinite(outputCompression)) form.set("output_compression", String(Math.max(0, Math.min(100, Math.round(outputCompression)))));
+}
+
 export default defineEventHandler(async (event) => {
   const body = (await readBody(event)) || {};
   const mode = String(body.mode || "").trim() as ChatImageMode;
@@ -51,6 +78,7 @@ export default defineEventHandler(async (event) => {
   const b64Json = normalizeB64Json(body.b64_json);
   const imageInputs = normalizeImageInputs(body);
   const imageSource = imageInputs[0] || "";
+  const maskSource = optionalString(body.mask || body.maskImage || body.maskDataUrl);
 
   if (!SUPPORTED_MODES.has(mode)) {
     return fail(event, 400, "UNSUPPORTED_MODE", "仅支持 official image generation、image edit、image-to-image chat、text-to-image chat 四种同步图片接口。");
@@ -69,6 +97,7 @@ export default defineEventHandler(async (event) => {
     if (mode === "generation") {
       upstreamUrl = buildCustomEndpoint(base, imageEndpoint) || buildEndpoint(base, "/v1/images/generations");
       const payload: Record<string, unknown> = { model, prompt, size, quality, n };
+      addOptionalPayloadParams(payload, body);
       if (!hasCustomImageEndpoint) {
         payload.b64_json = b64Json;
         if (imageInputs.length) payload.image = imageInputs;
@@ -78,15 +107,20 @@ export default defineEventHandler(async (event) => {
       upstreamUrl = buildCustomEndpoint(base, imageEndpoint) || buildEndpoint(base, "/v1/images/edits");
       const blobs = await Promise.all(imageInputs.map((source) => imageSourceToBlob(source)));
       if (!blobs.length || blobs.some((blob) => !blob)) return fail(event, 400, "BAD_REQUEST", "输入图片必须是可读取的 URL 或 Base64 Data URL。");
+      const maskBlob = maskSource ? await imageSourceToBlob(maskSource) : null;
+      if (maskSource && !maskBlob) return fail(event, 400, "BAD_REQUEST", "Mask 必须是可读取的图片 URL 或 Base64 Data URL。");
       const form = new FormData();
       form.set("model", model);
       blobs.forEach((blob, index) => {
         if (blob) form.append("image[]", blob, `input-image-${index + 1}.png`);
       });
+      if (maskBlob) form.set("mask", maskBlob, "mask.png");
       form.set("prompt", prompt);
       form.set("n", String(n));
       form.set("size", size);
       form.set("quality", quality);
+      form.set("b64_json", String(b64Json));
+      addOptionalFormParams(form, body);
       upstream = await fetchWithTimeout(upstreamUrl, {
         method: "POST",
         headers: { Authorization: `Bearer ${key}` },
@@ -137,7 +171,7 @@ export default defineEventHandler(async (event) => {
       );
     }
 
-    const images = extractPreviewUrls(data);
+    const images = toPreviewImageUrls(extractPreviewUrls(data));
     return {
       ok: true,
       mode,

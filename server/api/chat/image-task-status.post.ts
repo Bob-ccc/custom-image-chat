@@ -9,6 +9,7 @@ import {
   normalizeTaskStatus,
   providerFromBody,
   readUpstreamJson,
+  toPreviewImageUrls,
 } from "../../lib/chat-image-proxy";
 
 export default defineEventHandler(async (event) => {
@@ -47,7 +48,7 @@ export default defineEventHandler(async (event) => {
     }
 
     const { status, progress, failReason } = normalizeTaskStatus(data);
-    const images = extractPreviewUrls(data);
+    const images = toPreviewImageUrls(extractPreviewUrls(data));
 
     return {
       ok: true,

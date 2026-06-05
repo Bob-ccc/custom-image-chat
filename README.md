@@ -18,7 +18,9 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000/chat`.
+Then open `http://localhost:3000/` (HiDream), `http://localhost:3000/chat`, or `http://localhost:3000/gpt`.
+
+`/` is a pure-frontend HiDream page (`/hidream` redirects here). It calls the public HiDream Hugging Face Space directly from the browser, supports up to 4 concurrent tasks, keeps generation history in `localStorage`, and shows a retry banner after refresh (Gradio cannot resume the same SSE session). `/gpt` is the GPT image generator that previously lived at `/`.
 
 If this directory is moved into its own git repository, commit the generated lockfile from `npm install` in that repository.
 

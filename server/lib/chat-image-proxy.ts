@@ -2,12 +2,13 @@ import { setResponseStatus } from "h3";
 import type { H3Event } from "h3";
 import { ProxyAgent } from "undici";
 
-export const UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
+export const UPSTREAM_TIMEOUT_MS = 20 * 60 * 1000;
 export const APIFOX_DOC_HOST = "value-apiqk.apifox.cn";
 export const SUPPORTED_QUALITIES = new Set(["low", "medium", "high", "auto"]);
 
 const IMAGE_URL_RE = /https?:\/\/[^\s"'()[\]<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^\s"'()[\]<>]*)?/gi;
 const VIDEO_URL_RE = /https?:\/\/[^\s"'()[\]<>]+?\.(?:mp4|webm|mov|m4v)(?:\?[^\s"'()[\]<>]*)?/gi;
+const STRUCTURED_IMAGE_URL_KEY_RE = /^(?:url|image|image_url|imageUrl|output|output_url|outputUrl|result|result_url|resultUrl|displayUrl|localUrl|externalUrl|assetUrl|thumbnailUrl|coverUrl)$/i;
 const STRUCTURED_VIDEO_URL_KEY_RE = /^(?:url|video_url|videoUrl|video|output|result|video_url_hd|videoUrlHd|play_url|playUrl|download_url|downloadUrl)$/i;
 const MARKDOWN_IMAGE_RE = /!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi;
 const MARKDOWN_LINK_RE = /\[[^\]]+]\((https?:\/\/[^)\s]+)\)/gi;
@@ -58,7 +59,9 @@ export function buildEndpoint(baseRaw: unknown, path: string) {
   if (!base) return "";
   const normalizedPath = path.startsWith("/") ? path : "/" + path;
   if (base.endsWith(normalizedPath)) return base;
-  const withoutKnownEndpoint = base.replace(/\/v[12]\/(?:(?:images|videos)\/(?:generations(?:\/[^/]+)?|edits|tasks\/[^/]+)|videos(?:\/[^/]+)?|chat\/completions)$/i, "");
+  const withoutKnownEndpoint = base
+    .replace(/\/v[12]\/(?:(?:images|videos)\/(?:generations(?:\/[^/]+)?|edits|tasks\/[^/]+)|video\/(?:create|query|generations)|videos(?:\/[^/]+)?|chat\/completions)$/i, "")
+    .replace(/\/ent\/v2\/(?:img2video|start-end2video|tasks\/[^/]+\/creations)$/i, "");
   return withoutKnownEndpoint + normalizedPath;
 }
 
@@ -177,13 +180,24 @@ function collectImageFields(value: unknown, urls: string[]) {
     for (const item of value) collectImageFields(item, urls);
     return;
   }
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (isDataUrl(raw) || isHttpUrl(raw)) urls.push(raw);
+    return;
+  }
   if (!value || typeof value !== "object") return;
   const record = value as Record<string, unknown>;
-  const url = typeof record.url === "string" ? record.url.trim() : "";
-  if (url) urls.push(url);
   const b64Url = b64JsonToDataUrl(record.b64_json);
   if (b64Url) urls.push(b64Url);
-  for (const item of Object.values(record)) collectImageFields(item, urls);
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === "string") {
+      const raw = item.trim();
+      if (STRUCTURED_IMAGE_URL_KEY_RE.test(key) && (isDataUrl(raw) || isHttpUrl(raw))) {
+        urls.push(raw);
+      }
+    }
+    collectImageFields(item, urls);
+  }
 }
 
 function collectVideoFields(value: unknown, urls: string[]) {
@@ -228,6 +242,16 @@ export function extractPreviewUrls(data: unknown) {
   return unique(urls);
 }
 
+export function toPreviewImageUrl(url: string) {
+  const value = String(url || "").trim();
+  if (!/^http:\/\//i.test(value)) return value;
+  return "/api/chat/image-preview?url=" + encodeURIComponent(value);
+}
+
+export function toPreviewImageUrls(urls: string[]) {
+  return urls.map(toPreviewImageUrl);
+}
+
 export function extractVideoUrls(data: unknown) {
   const urls: string[] = [];
   collectVideoFields(data, urls);
@@ -242,8 +266,31 @@ export function extractVideoUrls(data: unknown) {
   return unique(urls);
 }
 
+async function readResponseTextLenient(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+  } catch (error) {
+    if (!chunks.length) throw error;
+  }
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(buffer);
+}
+
 export async function readUpstreamJson(response: Response) {
-  const rawText = await response.text();
+  const rawText = await readResponseTextLenient(response);
   if (!rawText) return { data: null, rawText: "" };
   try {
     return { data: JSON.parse(rawText), rawText };
@@ -284,6 +331,7 @@ export async function postJson(endpoint: string, key: string, payload: Record<st
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      "Accept-Encoding": "identity",
       Authorization: `Bearer ${key}`,
     },
     body: JSON.stringify(payload),
@@ -323,14 +371,14 @@ export function extractTaskId(data: unknown) {
 }
 
 export function normalizeTaskStatus(data: unknown) {
-  const rawStatus = findFirstStringByKey(data, ["status", "task_status", "taskStatus"]) || "IN_PROGRESS";
+  const rawStatus = findFirstStringByKey(data, ["status", "state", "task_status", "taskStatus"]) || "IN_PROGRESS";
   const normalizedStatus = rawStatus.toLowerCase();
-  const status = normalizedStatus === "completed" || normalizedStatus === "done" || normalizedStatus === "succeeded" || normalizedStatus === "success" ? "SUCCESS"
+  const status = normalizedStatus === "complete" || normalizedStatus === "completed" || normalizedStatus === "done" || normalizedStatus === "succeeded" || normalizedStatus === "success" ? "SUCCESS"
     : normalizedStatus === "failed" || normalizedStatus === "fail" || normalizedStatus === "failure" || normalizedStatus === "expired" || normalizedStatus === "error" || normalizedStatus === "cancelled" || normalizedStatus === "canceled" ? "FAILURE"
       : normalizedStatus === "queued" || normalizedStatus === "in_progress" || normalizedStatus === "processing" || normalizedStatus === "pending" || normalizedStatus === "running" ? "IN_PROGRESS"
         : rawStatus;
   const progress = findFirstStringByKey(data, ["progress"]);
-  const failReason = findFirstStringByKey(data, ["fail_reason", "failReason", "message"]);
+  const failReason = findFirstStringByKey(data, ["fail_reason", "failReason", "error_message", "errorMessage", "reason", "message", "error"]);
   return { status, progress, failReason };
 }
 

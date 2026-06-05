@@ -1,8 +1,37 @@
 <script setup lang="ts">
 type GptImageMode = "text-to-image" | "image-to-image";
 type QualityKey = "low" | "medium" | "high" | "auto";
+type RestoreRecord = {
+  id: string;
+  mode?: string;
+  model?: string;
+  base?: string;
+  prompt?: string;
+  size?: string;
+  quality?: QualityKey;
+  n?: number;
+  imageInputValue?: string;
+  images?: string[];
+  response?: unknown;
+  config?: Record<string, unknown>;
+};
 
-defineProps<{ embedded?: boolean }>();
+const props = defineProps<{ embedded?: boolean; restoreRecord?: RestoreRecord | null }>();
+const emit = defineEmits<{
+  generated: [payload: {
+    data: unknown;
+    images: string[];
+    imageMode: GptImageMode;
+    model: string;
+    base: string;
+    prompt: string;
+    size: string;
+    quality: QualityKey;
+    count: number;
+    sourceImages: string[];
+    imageEndpoint: string;
+  }];
+}>();
 
 const API_KEYS_STORAGE_KEY = "goodscheck:chat-api-keys:v1";
 const CUSTOM_IMAGE_PROVIDER_STORAGE_KEY = "goodscheck:chat-custom-image-provider:v1";
@@ -10,8 +39,17 @@ const DEFAULT_MODEL = "gpt-image-2";
 const DEFAULT_BASE_URL = "https://api.openai.com";
 const MAX_SOURCE_IMAGES = 10;
 
-const modelOptions = ["gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
-const sizeOptions = ["1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840", "auto"];
+const modelOptions = ["gpt-image-2", "gpt-image-2-all", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
+const sizeOptions = [
+  { value: "1024x1024", label: "1024x1024 · 1K 方图 · 1:1" },
+  { value: "1536x1024", label: "1536x1024 · 1K 横图 · 3:2" },
+  { value: "1024x1536", label: "1024x1536 · 1K 竖图 · 2:3" },
+  { value: "2048x2048", label: "2048x2048 · 2K 方图 · 1:1" },
+  { value: "2048x1152", label: "2048x1152 · 2K 横图 · 16:9" },
+  { value: "3840x2160", label: "3840x2160 · 4K 横图 · 16:9" },
+  { value: "2160x3840", label: "2160x3840 · 4K 竖图 · 9:16" },
+  { value: "auto", label: "auto · 自动默认" },
+];
 const qualityOptions: QualityKey[] = ["auto", "low", "medium", "high"];
 
 const imageMode = ref<GptImageMode>("text-to-image");
@@ -31,7 +69,7 @@ const previewUrls = ref<string[]>([]);
 const endpointPath = computed(() => imageMode.value === "image-to-image" ? "/v1/images/edits" : "/v1/images/generations");
 const endpointPreview = computed(() => buildEndpoint(baseUrl.value, endpointPath.value));
 const cleanSourceImages = computed(() => {
-  return Array.from(new Set(sourceImages.value.map((url) => url.trim()).filter(Boolean))).slice(0, MAX_SOURCE_IMAGES);
+  return Array.from(new Set(sourceImages.value.map((url: string) => url.trim()).filter(Boolean))).slice(0, MAX_SOURCE_IMAGES);
 });
 const requestJson = computed(() => JSON.stringify({
   mode: imageMode.value === "image-to-image" ? "edit" : "generation",
@@ -48,12 +86,31 @@ const requestJson = computed(() => JSON.stringify({
   image: imageMode.value === "image-to-image" ? cleanSourceImages.value : undefined,
 }, null, 2));
 const responseText = computed(() => responseJson.value ? JSON.stringify(responseJson.value, null, 2) : "");
+const responseStatus = computed(() => {
+  const value = responseJson.value as { ok?: boolean } | null;
+  return value?.ok === true ? "ok" : value?.ok === false ? "error" : "idle";
+});
 
 onMounted(() => {
   loadStoredProvider();
+  applyRestoreRecord(props.restoreRecord);
+  window.addEventListener("chat:use-resource-image", handleResourceImageEvent);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("chat:use-resource-image", handleResourceImageEvent);
 });
 
 watch([apiKey, baseUrl, imageMode], persistStoredProvider);
+watch(() => props.restoreRecord?.id, () => {
+  applyRestoreRecord(props.restoreRecord);
+});
+
+function handleResourceImageEvent(event: Event) {
+  const url = String((event as CustomEvent<{ url?: string }>).detail?.url || "").trim();
+  if (!url) return;
+  appendSourceImage(url);
+}
 
 function readStoredApiKeys(): Record<string, string> {
   if (!import.meta.client) return {};
@@ -94,6 +151,34 @@ function persistStoredProvider() {
   } catch {}
 }
 
+function recordConfigString(config: Record<string, unknown>, key: string, fallback = "") {
+  const value = config[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function recordConfigStringArray(config: Record<string, unknown>, key: string) {
+  return Array.isArray(config[key]) ? (config[key] as unknown[]).map((item) => String(item || "").trim()).filter(Boolean) : [];
+}
+
+function applyRestoreRecord(record?: RestoreRecord | null) {
+  if (!record) return;
+  const config = record.config || {};
+  imageMode.value = config.customImageMode === "image-to-image" || record.mode === "edit" ? "image-to-image" : "text-to-image";
+  baseUrl.value = recordConfigString(config, "customImageBaseUrl", record.base || baseUrl.value);
+  model.value = record.model || model.value;
+  prompt.value = record.prompt || "";
+  size.value = record.size || size.value;
+  quality.value = record.quality || quality.value;
+  count.value = Number.isFinite(Number(record.n)) ? Number(record.n) : count.value;
+  const restoredImages = recordConfigStringArray(config, "generationImageUrls");
+  const legacyImages = String(record.imageInputValue || "").split(/\n+/).map((url: string) => url.trim()).filter(Boolean);
+  const nextImages = restoredImages.length ? restoredImages : legacyImages;
+  sourceImages.value = nextImages.length ? [...nextImages, ""].slice(0, MAX_SOURCE_IMAGES) : [""];
+  responseJson.value = record.response ?? null;
+  previewUrls.value = Array.isArray(record.images) ? [...record.images] : [];
+  errorMessage.value = "";
+}
+
 function buildEndpoint(baseRaw: string, path: string) {
   const base = baseRaw.trim().replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : "/" + path;
@@ -111,12 +196,35 @@ function addSourceImage() {
   sourceImages.value = [...sourceImages.value, ""];
 }
 
+function appendSourceImage(url: string) {
+  imageMode.value = "image-to-image";
+  const current = sourceImages.value.map((item: string) => item.trim());
+  const existingIndex = current.findIndex(Boolean);
+  if (current.includes(url)) return;
+  const emptyIndex = current.findIndex((item: string) => !item);
+  if (emptyIndex >= 0) {
+    const next = [...sourceImages.value];
+    next[emptyIndex] = url;
+    sourceImages.value = next;
+    return;
+  }
+  if (sourceImages.value.length < MAX_SOURCE_IMAGES) {
+    sourceImages.value = [...sourceImages.value, url];
+    return;
+  }
+  if (existingIndex >= 0) {
+    const next = [...sourceImages.value];
+    next[existingIndex] = url;
+    sourceImages.value = next;
+  }
+}
+
 function removeSourceImage(index: number) {
   if (sourceImages.value.length <= 1) {
     sourceImages.value = [""];
     return;
   }
-  sourceImages.value = sourceImages.value.filter((_item, itemIndex) => itemIndex !== index);
+  sourceImages.value = sourceImages.value.filter((_item: string, itemIndex: number) => itemIndex !== index);
 }
 
 function fileToDataUrl(file: File) {
@@ -135,7 +243,7 @@ async function handleFiles(event: Event) {
   try {
     const available = Math.max(0, MAX_SOURCE_IMAGES - cleanSourceImages.value.length);
     const dataUrls = await Promise.all(files.slice(0, available).map(fileToDataUrl));
-    const current = sourceImages.value.map((url) => url.trim()).filter(Boolean);
+    const current = sourceImages.value.map((url: string) => url.trim()).filter(Boolean);
     sourceImages.value = [...current, ...dataUrls, ""].slice(0, MAX_SOURCE_IMAGES);
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
@@ -155,6 +263,12 @@ function resetForm() {
   errorMessage.value = "";
   responseJson.value = null;
   previewUrls.value = [];
+}
+
+function displayImageUrl(url: string) {
+  const value = String(url || "").trim();
+  if (!/^http:\/\//i.test(value)) return value;
+  return "/api/chat/image-preview?url=" + encodeURIComponent(value);
 }
 
 async function submit() {
@@ -204,6 +318,20 @@ async function submit() {
     previewUrls.value = Array.isArray(data?.images) ? data.images : [];
     if (!response.ok || data?.ok === false) {
       errorMessage.value = data?.error?.message || "生成失败。";
+    } else if (previewUrls.value.length) {
+      emit("generated", {
+        data,
+        images: previewUrls.value,
+        imageMode: imageMode.value,
+        model: model.value.trim(),
+        base: baseUrl.value.trim(),
+        prompt: prompt.value,
+        size: size.value,
+        quality: quality.value,
+        count: Number(count.value) || 1,
+        sourceImages: cleanSourceImages.value,
+        imageEndpoint: endpointPath.value,
+      });
     }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
@@ -214,7 +342,7 @@ async function submit() {
 </script>
 
 <template>
-  <main class="gpt-image-page" :class="{ embedded }">
+  <main class="gpt-image-page" :class="{ embedded: props.embedded }">
     <form class="gpt-image-workbench" @submit.prevent="submit">
       <section class="panel provider-panel">
         <div class="panel-title">
@@ -268,7 +396,7 @@ async function submit() {
         <label>
           <span>尺寸</span>
           <select v-model="size">
-            <option v-for="item in sizeOptions" :key="item" :value="item">{{ item }}</option>
+            <option v-for="item in sizeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
         </label>
         <label>
@@ -297,14 +425,14 @@ async function submit() {
         </div>
         <div v-if="loading" class="empty-state">生成中...</div>
         <div v-else-if="previewUrls.length" class="image-grid">
-          <a v-for="url in previewUrls" :key="url" :href="url" target="_blank" rel="noreferrer">
-            <img :src="url" alt="Generated image" />
+          <a v-for="url in previewUrls" :key="url" :href="displayImageUrl(url)" target="_blank" rel="noreferrer">
+            <img :src="displayImageUrl(url)" alt="Generated image" />
           </a>
         </div>
         <div v-else class="empty-state">生成后在这里预览</div>
       </section>
 
-      <section class="panel json-panel">
+      <section v-if="!props.embedded" class="panel json-panel">
         <div class="panel-title">
           <h2>请求 JSON</h2>
           <span>{{ endpointPreview }}</span>
@@ -312,10 +440,10 @@ async function submit() {
         <pre>{{ requestJson }}</pre>
       </section>
 
-      <section class="panel json-panel">
+      <section v-if="!props.embedded" class="panel json-panel">
         <div class="panel-title">
           <h2>响应 JSON</h2>
-          <span>{{ (responseJson as any)?.ok === true ? "ok" : (responseJson as any)?.ok === false ? "error" : "idle" }}</span>
+          <span>{{ responseStatus }}</span>
         </div>
         <pre>{{ responseText || "未开始" }}</pre>
       </section>
@@ -339,6 +467,8 @@ async function submit() {
 .gpt-image-page.embedded {
   min-height: 0;
   grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  align-items: start;
   padding: 0;
   background: transparent;
 }

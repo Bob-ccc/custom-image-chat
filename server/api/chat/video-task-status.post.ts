@@ -22,6 +22,9 @@ export default defineEventHandler(async (event) => {
   const veoUnifiedChannel = ["veo-unified", "yunwu-veo-unified"].includes(channel);
   const veoOpenAIChannel = ["veo-openai", "yunwu-veo-openai"].includes(channel);
   const zhipuCogVideoChannel = ["zhipu-cogvideo", "zhipu", "cogvideox", "cogvideox-3"].includes(channel);
+  const lingyaSoraChannel = ["lingya-sora", "lingya", "sora-2-all-vip-15s"].includes(channel);
+  const yunwuViduChannel = ["yunwu-vidu", "vidu", "viduq3-turbo", "viduq2-turbo"].includes(channel);
+  const dimleapHappyhorseChannel = ["dimleap-happyhorse", "dimleap", "happyhorse-1.0-i2v", "happyhorse-1.0-r2v"].includes(channel);
   const yunwuUnifiedChannel = grokUnifiedChannel || veoUnifiedChannel;
 
   const providerError = assertProvider(event, base, key);
@@ -35,15 +38,21 @@ export default defineEventHandler(async (event) => {
       base,
       zhipuCogVideoChannel
         ? `/async-result/${encodeURIComponent(taskId)}`
+        : yunwuViduChannel
+        ? `/ent/v2/tasks/${encodeURIComponent(taskId)}/creations`
+        : dimleapHappyhorseChannel
+        ? `/v1/videos/${encodeURIComponent(taskId)}`
         : veoOpenAIChannel
         ? `/v1/videos/${encodeURIComponent(taskId)}`
+        : lingyaSoraChannel
+        ? "/v1/video/query"
         : yunwuUnifiedChannel
         ? "/v1/video/query"
         : grokOpenAIChannel
           ? "/v1/video/query"
           : `/v2/videos/generations/${encodeURIComponent(taskId)}`,
     );
-    const upstream = yunwuUnifiedChannel || grokOpenAIChannel
+    const upstream = lingyaSoraChannel || yunwuUnifiedChannel || grokOpenAIChannel
       ? await fetchWithTimeout(withQuery(upstreamUrl, { id: taskId }), {
           method: "GET",
           headers: {
@@ -75,8 +84,9 @@ export default defineEventHandler(async (event) => {
       );
     }
 
-    const { status, progress, failReason } = normalizeTaskStatus(data);
     const videos = extractVideoUrls(data);
+    const { status: normalizedStatus, progress, failReason } = normalizeTaskStatus(data);
+    const status = videos.length && normalizedStatus === "IN_PROGRESS" ? "SUCCESS" : normalizedStatus;
 
     return {
       ok: true,

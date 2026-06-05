@@ -1,5 +1,5 @@
 <script setup lang="ts">
-type ModeKey = "generation" | "edit" | "image-chat" | "text-chat" | "video";
+type ModeKey = "generation" | "edit" | "image-chat" | "text-chat" | "video" | "dialogue";
 type LangKey = "zh" | "en";
 type QualityKey = "low" | "medium" | "high" | "auto";
 type ExecutionMode = "sync" | "async";
@@ -7,9 +7,42 @@ type TaskStatus = "SYNC_SUCCESS" | "IN_PROGRESS" | "SUCCESS" | "FAILURE";
 type MediaType = "image" | "video";
 type ImageEntryKey = "official" | "custom";
 type CustomImageMode = "text-to-image" | "image-to-image";
-type VideoChannelKey = "veo" | "grok-openai" | "grok-unified" | "veo-unified" | "veo-openai" | "zhipu-cogvideo";
+type DialogueProviderKey = "chatgpt" | "zhipu";
+type DialogueMessageRole = "user" | "assistant";
+type DialogueMessage = {
+  id: string;
+  role: DialogueMessageRole;
+  content: string;
+  createdAt: string;
+  model?: string;
+  reasoningContent?: string;
+  streamStatus?: "connected" | "receiving" | "done" | "failed";
+  streamChunkCount?: number;
+  reasoningExpanded?: boolean;
+  stopped?: boolean;
+};
+type DialogueProviderState = {
+  input: string;
+  messages: DialogueMessage[];
+  model: string;
+  base: string;
+};
+type VideoChannelKey = "veo" | "grok-openai" | "grok-unified" | "veo-unified" | "veo-openai" | "zhipu-cogvideo" | "lingya-sora" | "yunwu-vidu" | "dimleap-happyhorse";
 type GrokReferenceMode = "single" | "multi";
 type ZhipuVideoQuality = "speed" | "quality";
+type GptImageGeneratedPayload = {
+  data: unknown;
+  images: string[];
+  imageMode: CustomImageMode;
+  model: string;
+  base: string;
+  prompt: string;
+  size: string;
+  quality: QualityKey;
+  count: number;
+  sourceImages: string[];
+  imageEndpoint: string;
+};
 type ChatHistoryRecord = {
   id: string;
   kind: "sync" | "async";
@@ -39,6 +72,7 @@ type ChatHistoryRecord = {
   images: string[];
   videos: string[];
   response: unknown;
+  config: Record<string, unknown>;
 };
 
 const HISTORY_STORAGE_KEY = "goodscheck:chat-history:v1";
@@ -46,7 +80,11 @@ const API_KEY_STORAGE_KEY = "goodscheck:chat-api-key:v1";
 const API_KEYS_STORAGE_KEY = "goodscheck:chat-api-keys:v1";
 const IMAGE_ENTRY_STORAGE_KEY = "goodscheck:chat-image-entry:v1";
 const CUSTOM_IMAGE_PROVIDER_STORAGE_KEY = "goodscheck:chat-custom-image-provider:v1";
+const CHAT_UI_STATE_STORAGE_KEY = "goodscheck:chat-ui-state:v1";
 const HISTORY_LIMIT = 100;
+const VIDEO_IMAGE_CACHE_LIMIT = 9;
+const HISTORY_IMAGE_URL_RE = /https?:\/\/[^\s"'()[\]<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^\s"'()[\]<>]*)?/gi;
+const STRUCTURED_HISTORY_IMAGE_KEY_RE = /^(?:url|image|image_url|imageUrl|output|result|displayUrl|localUrl|externalUrl|assetUrl|thumbnailUrl|coverUrl)$/i;
 const APIFOX_DOC_HOSTS = new Set(["value-apiqk.apifox.cn", "gpt-best.apifox.cn", "yunwu.apifox.cn"]);
 const DEFAULT_API_BASE_URL = "https://api.bltcy.ai/";
 const VIDEO_API_BASE_BY_CHANNEL: Record<VideoChannelKey, string> = {
@@ -56,7 +94,24 @@ const VIDEO_API_BASE_BY_CHANNEL: Record<VideoChannelKey, string> = {
   "veo-unified": "https://yunwu.ai",
   "veo-openai": "https://yunwu.ai",
   "zhipu-cogvideo": "https://open.bigmodel.cn/api/paas/v4",
+  "lingya-sora": "https://api.lingyaai.cn",
+  "yunwu-vidu": "https://yunwu.ai",
+  "dimleap-happyhorse": "https://api.dimleap.cn",
 };
+const DIALOGUE_API_BASE_BY_PROVIDER: Record<DialogueProviderKey, string> = {
+  chatgpt: "https://api.openai.com/v1",
+  zhipu: "https://open.bigmodel.cn/api/paas/v4",
+};
+const chatgptDialogueModelOptions = [
+  "gpt-5.5",
+  "gpt-5.1",
+  "gpt-4o",
+];
+const zhipuDialogueModelOptions = [
+  "glm-4.7",
+  "glm-4.6v",
+  "glm-4.5-air",
+];
 const apiBaseOptions = [
   DEFAULT_API_BASE_URL,
   "https://value.apiqik.online",
@@ -92,6 +147,17 @@ const veoOpenAIVideoModelOptions = [
 const zhipuCogVideoModelOptions = [
   "cogvideox-3",
 ];
+const lingyaSoraModelOptions = [
+  "sora-2-all-vip-15s",
+];
+const yunwuViduModelOptions = [
+  "viduq3-turbo",
+  "viduq2-turbo",
+];
+const dimleapHappyhorseModelOptions = [
+  "happyhorse-1.0-i2v",
+  "happyhorse-1.0-r2v",
+];
 const grokUnifiedAspectRatioOptions = [
   "2:3",
   "3:2",
@@ -107,6 +173,10 @@ const bltVideoAspectRatioOptions = [
 ];
 const grokUnifiedSizeOptions = [
   "720P",
+];
+const lingyaSoraSizeOptions = [
+  "small",
+  "large",
 ];
 const grokAspectRatioOptions = [
   "16:9",
@@ -129,6 +199,13 @@ const zhipuVideoSizeOptions = [
 ];
 const zhipuVideoFpsOptions = [30, 60];
 const zhipuVideoDurationOptions = [5, 10];
+const yunwuViduDurationOptions = Array.from({ length: 16 }, (_value, index) => index + 1);
+const yunwuViduResolutionOptions = ["540p", "720p", "1080p"];
+const yunwuViduMovementAmplitudeOptions = ["auto", "small", "medium", "large"];
+const yunwuViduAudioTypeOptions = ["all", "speech_only", "sound_effect_only"];
+const yunwuViduWatermarkPositionOptions = [1, 2, 3, 4];
+const dimleapHappyhorseDurationOptions = Array.from({ length: 13 }, (_value, index) => index + 3);
+const dimleapHappyhorseResolutionOptions = ["720P", "1080P"];
 const videoChannelOptions: Array<{ value: VideoChannelKey; labelZh: string; labelEn: string; hintZh: string; hintEn: string; endpoint: string }> = [
   {
     value: "veo",
@@ -177,6 +254,30 @@ const videoChannelOptions: Array<{ value: VideoChannelKey; labelZh: string; labe
     hintZh: "走智谱 /api/paas/v4/videos/generations，支持文生视频、图生视频和首尾帧。",
     hintEn: "Uses Zhipu /api/paas/v4/videos/generations for text, image, and first-last-frame video.",
     endpoint: "/videos/generations",
+  },
+  {
+    value: "lingya-sora",
+    labelZh: "灵芽 Sora",
+    labelEn: "Lingya Sora",
+    hintZh: "走灵芽 Sora 2 unified /v1/video/create，支持 sora-2-all-vip-15s。",
+    hintEn: "Uses Lingya Sora 2 unified /v1/video/create for sora-2-all-vip-15s.",
+    endpoint: "/v1/video",
+  },
+  {
+    value: "yunwu-vidu",
+    labelZh: "云雾 Vidu",
+    labelEn: "Yunwu Vidu",
+    hintZh: "走云雾 Vidu /ent/v2/img2video 或 /ent/v2/start-end2video，支持 viduq3-turbo 和 viduq2-turbo。",
+    hintEn: "Uses Yunwu Vidu /ent/v2/img2video or /ent/v2/start-end2video with viduq3-turbo and viduq2-turbo.",
+    endpoint: "/ent/v2",
+  },
+  {
+    value: "dimleap-happyhorse",
+    labelZh: "Dimleap Happyhorse",
+    labelEn: "Dimleap Happyhorse",
+    hintZh: "走 Dimleap /v1/video/generations 创建 happyhorse 图生视频或参考生视频任务，查询走 /v1/videos/{id}。",
+    hintEn: "Uses Dimleap /v1/video/generations for Happyhorse image-to-video or reference-to-video tasks and /v1/videos/{id} for status.",
+    endpoint: "/v1/video",
   },
 ];
 const sizeOptions = [
@@ -248,6 +349,15 @@ const modeOptions: Array<{
     path: "/v2/videos/generations",
     docUrl: "https://gpt-best.apifox.cn/api-343590061",
   },
+  {
+    key: "dialogue",
+    labelZh: "对话",
+    labelEn: "Chat",
+    hintZh: "对话渠道，ChatGPT 使用 OpenAI Responses，智谱使用 Chat Completions。",
+    hintEn: "Dialogue providers. ChatGPT uses OpenAI Responses, and Zhipu uses Chat Completions.",
+    path: "/v1/responses",
+    docUrl: "",
+  },
 ];
 
 const lang = ref<LangKey>("zh");
@@ -273,6 +383,20 @@ const grokInputReference = ref("");
 const selectedGrokHistoryImageKey = ref("");
 const videoImageUrls = ref(["", "", ""]);
 const selectedVideoHistoryImageKeys = ref(["", "", ""]);
+const dialogueProvider = ref<DialogueProviderKey>("zhipu");
+const dialogueInput = ref("");
+const dialogueBaseUrl = ref("");
+const dialogueInputEl = ref<HTMLTextAreaElement | null>(null);
+const dialogueMessages = ref<DialogueMessage[]>([]);
+const dialogueProviderStates = ref<Record<DialogueProviderKey, DialogueProviderState>>({
+  chatgpt: { input: "", messages: [], model: "gpt-5.5", base: DIALOGUE_API_BASE_BY_PROVIDER.chatgpt },
+  zhipu: { input: "", messages: [], model: "glm-4.7", base: DIALOGUE_API_BASE_BY_PROVIDER.zhipu },
+});
+const dialogueMessagesEl = ref<HTMLElement | null>(null);
+const dialogueReasoningEls = ref<Record<string, HTMLElement | null>>({});
+const dialogueSidebarCollapsed = ref(false);
+const activeDialogueAssistantId = ref("");
+const copiedDialogueMessageId = ref("");
 const grokAspectRatio = ref("16:9");
 const grokDuration = ref(10);
 const grokResolution = ref("720P");
@@ -284,6 +408,25 @@ const zhipuVideoFps = ref(30);
 const zhipuVideoDuration = ref(5);
 const zhipuWithAudio = ref(true);
 const zhipuWatermarkEnabled = ref(true);
+const yunwuViduDuration = ref(5);
+const yunwuViduResolution = ref("540p");
+const yunwuViduMovementAmplitude = ref("auto");
+const yunwuViduSeed = ref(0);
+const yunwuViduAudio = ref(false);
+const yunwuViduAudioType = ref("all");
+const yunwuViduVoiceId = ref("");
+const yunwuViduIsRec = ref(false);
+const yunwuViduBgm = ref(false);
+const yunwuViduOffPeak = ref(false);
+const yunwuViduWatermark = ref(false);
+const yunwuViduWatermarkPosition = ref(3);
+const yunwuViduWatermarkUrl = ref("");
+const yunwuViduMetaData = ref("");
+const yunwuViduPayload = ref("");
+const yunwuViduCallbackUrl = ref("");
+const dimleapHappyhorseWatermark = ref(false);
+const dimleapHappyhorseSeedEnabled = ref(false);
+const dimleapHappyhorseSeed = ref(12345);
 const size = ref("1024x1024");
 const quality = ref<QualityKey>("auto");
 const count = ref(1);
@@ -303,26 +446,42 @@ const countdownTotalSeconds = ref(0);
 const countdownMediaType = ref<MediaType>("image");
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 let syncingApiKeyFromStorage = false;
+let loadingUiState = false;
+let restoringDialogueProviderState = false;
+let activeDialogueController: AbortController | null = null;
+let dialogueCopyTimer: ReturnType<typeof setTimeout> | null = null;
 
 const currentMode = computed(() => modeOptions.find((item) => item.key === mode.value) || modeOptions[0]);
 const isVideoMode = computed(() => mode.value === "video");
-const isCustomImageEntry = computed(() => !isVideoMode.value && imageEntry.value === "custom");
+const isDialogueMode = computed(() => mode.value === "dialogue");
+const isImageMode = computed(() => !isVideoMode.value && !isDialogueMode.value);
+const isCustomImageEntry = computed(() => isImageMode.value && imageEntry.value === "custom");
 const isCustomImageToImage = computed(() => isCustomImageEntry.value && customImageMode.value === "image-to-image");
 const isGrokOpenAIFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "grok-openai");
 const isGrokUnifiedFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "grok-unified");
 const isVeoUnifiedFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "veo-unified");
 const isVeoOpenAIFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "veo-openai");
 const isZhipuCogVideoChannel = computed(() => isVideoMode.value && videoChannel.value === "zhipu-cogvideo");
+const isLingyaSoraChannel = computed(() => isVideoMode.value && videoChannel.value === "lingya-sora");
+const isYunwuViduChannel = computed(() => isVideoMode.value && videoChannel.value === "yunwu-vidu");
+const isDimleapHappyhorseChannel = computed(() => isVideoMode.value && videoChannel.value === "dimleap-happyhorse");
+const isDimleapHappyhorseI2vModel = computed(() => isDimleapHappyhorseChannel.value && model.value === "happyhorse-1.0-i2v");
+const isDimleapHappyhorseR2vModel = computed(() => isDimleapHappyhorseChannel.value && model.value === "happyhorse-1.0-r2v");
 const isBltVideoChannel = computed(() => isVideoMode.value && videoChannel.value === "veo");
 const isYunwuUnifiedVideoChannel = computed(() => isGrokUnifiedFormatChannel.value || isVeoUnifiedFormatChannel.value);
-const isYunwuVideoChannel = computed(() => isGrokOpenAIFormatChannel.value || isYunwuUnifiedVideoChannel.value || isVeoOpenAIFormatChannel.value);
-const currentModeLabel = computed(() => isVideoMode.value ? modeLabel(mode.value, videoChannel.value) : imageEntryLabel(imageEntry.value));
+const isYunwuVideoChannel = computed(() => isGrokOpenAIFormatChannel.value || isYunwuUnifiedVideoChannel.value || isVeoOpenAIFormatChannel.value || isYunwuViduChannel.value);
+const currentModeLabel = computed(() => isDialogueMode.value ? dialogueProviderLabel(dialogueProvider.value) : isVideoMode.value ? modeLabel(mode.value, videoChannel.value) : imageEntryLabel(imageEntry.value));
 const activeModelOptions = computed(() => isVideoMode.value
-  ? (isGrokOpenAIFormatChannel.value ? grokVideoModelOptions : isGrokUnifiedFormatChannel.value ? grokUnifiedVideoModelOptions : isVeoUnifiedFormatChannel.value ? veoUnifiedVideoModelOptions : isVeoOpenAIFormatChannel.value ? veoOpenAIVideoModelOptions : isZhipuCogVideoChannel.value ? zhipuCogVideoModelOptions : videoModelOptions)
+  ? (isGrokOpenAIFormatChannel.value ? grokVideoModelOptions : isGrokUnifiedFormatChannel.value ? grokUnifiedVideoModelOptions : isVeoUnifiedFormatChannel.value ? veoUnifiedVideoModelOptions : isVeoOpenAIFormatChannel.value ? veoOpenAIVideoModelOptions : isZhipuCogVideoChannel.value ? zhipuCogVideoModelOptions : isLingyaSoraChannel.value ? lingyaSoraModelOptions : isYunwuViduChannel.value ? yunwuViduModelOptions : isDimleapHappyhorseChannel.value ? dimleapHappyhorseModelOptions : videoModelOptions)
+  : isDialogueMode.value
+  ? (dialogueProvider.value === "zhipu" ? zhipuDialogueModelOptions : chatgptDialogueModelOptions)
   : isCustomImageEntry.value && !modelOptions.includes(model.value)
     ? [model.value, ...modelOptions]
     : modelOptions);
-const effectiveBaseUrl = computed(() => isVideoMode.value ? videoBaseForChannel(videoChannel.value) : isCustomImageEntry.value ? customImageBaseUrl.value.trim() : baseUrl.value.trim());
+const currentYunwuViduDurationOptions = computed(() => model.value === "viduq2-turbo"
+  ? yunwuViduDurationOptions.slice(0, 10)
+  : yunwuViduDurationOptions);
+const effectiveBaseUrl = computed(() => isDialogueMode.value ? (dialogueBaseUrl.value.trim() || DIALOGUE_API_BASE_BY_PROVIDER[dialogueProvider.value]) : isVideoMode.value ? videoBaseForChannel(videoChannel.value) : isCustomImageEntry.value ? customImageBaseUrl.value.trim() : baseUrl.value.trim());
 const customImageEndpointPath = computed(() => isCustomImageToImage.value ? "/v1/images/edits" : "/v1/images/generations");
 const customImageGenerationEndpoint = computed(() => isCustomImageEntry.value ? buildCustomPreviewEndpoint(customImageBaseUrl.value, customImageEndpointPath.value) : "");
 const effectiveApiKey = computed(() => isCustomImageEntry.value ? customImageApiKey.value : apiKey.value);
@@ -331,6 +490,10 @@ const isGrokSingleReferenceMode = computed(() => isGrokOpenAIFormatChannel.value
 const isGrokMultiReferenceMode = computed(() => isGrokOpenAIFormatChannel.value && grokReferenceMode.value === "multi");
 const videoImageLimit = computed(() => {
   if (isZhipuCogVideoChannel.value) return 2;
+  if (isLingyaSoraChannel.value) return 1;
+  if (isYunwuViduChannel.value) return 2;
+  if (isDimleapHappyhorseR2vModel.value) return 9;
+  if (isDimleapHappyhorseChannel.value) return 1;
   if (isVeoOpenAIFormatChannel.value) return 2;
   if (isVeoUnifiedFormatChannel.value) return 3;
   if (isGrokUnifiedFormatChannel.value) return 7;
@@ -343,6 +506,9 @@ const videoAllowsImages = computed(() => isVideoMode.value && videoImageLimit.va
 const supportsImageInput = computed(() => (mode.value === "generation" && !isCustomImageEntry.value) || needsImage.value || videoAllowsImages.value || (isGrokOpenAIFormatChannel.value && isGrokSingleReferenceMode.value));
 const asyncAvailable = computed(() => mode.value === "generation" && !isCustomImageEntry.value);
 const videoDocUrl = computed(() => {
+  if (isLingyaSoraChannel.value) return "https://api.lingyaai.cn/doc/#/coding/sora-2-unify";
+  if (isDimleapHappyhorseChannel.value) return `https://dimleap.cn/models/playground?model=${model.value === "happyhorse-1.0-r2v" ? "happyhorse-1.0-r2v" : "happyhorse-1.0-i2v"}&categoryId=video`;
+  if (isYunwuViduChannel.value) return videoImages.value.length >= 2 ? "https://yunwu.apifox.cn/api-407937113" : "https://yunwu.apifox.cn/api-407755273";
   if (isZhipuCogVideoChannel.value) return "https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E8%A7%86%E9%A2%91%E7%94%9F%E6%88%90%E5%BC%82%E6%AD%A5";
   if (isVeoOpenAIFormatChannel.value) return "https://yunwu.apifox.cn/api-370109881";
   if (isVeoUnifiedFormatChannel.value) return "https://yunwu.apifox.cn/api-311083745";
@@ -351,6 +517,9 @@ const videoDocUrl = computed(() => {
   return videoImages.value.length ? "https://gpt-best.apifox.cn/api-343632235" : "https://gpt-best.apifox.cn/api-343590061";
 });
 const videoStatusDocUrl = computed(() => {
+  if (isLingyaSoraChannel.value) return "https://api.lingyaai.cn/doc/#/coding/sora-2-unify";
+  if (isDimleapHappyhorseChannel.value) return `https://dimleap.cn/models/playground?model=${model.value === "happyhorse-1.0-r2v" ? "happyhorse-1.0-r2v" : "happyhorse-1.0-i2v"}&categoryId=video`;
+  if (isYunwuViduChannel.value) return "https://yunwu.apifox.cn/api-407353662";
   if (isZhipuCogVideoChannel.value) return "https://docs.bigmodel.cn/api-reference/%E6%A8%A1%E5%9E%8B-api/%E6%9F%A5%E8%AF%A2%E5%BC%82%E6%AD%A5%E7%BB%93%E6%9E%9C";
   if (isVeoOpenAIFormatChannel.value) return "https://yunwu.apifox.cn/api-370109885";
   if (isVeoUnifiedFormatChannel.value) return "https://yunwu.apifox.cn/api-311081757";
@@ -358,11 +527,14 @@ const videoStatusDocUrl = computed(() => {
   if (isGrokOpenAIFormatChannel.value) return "https://yunwu.apifox.cn/api-428940785";
   return "";
 });
-const endpointPath = computed(() => isZhipuCogVideoChannel.value ? "/videos/generations" : isYunwuUnifiedVideoChannel.value ? "/v1/video/create" : isGrokOpenAIFormatChannel.value || isVeoOpenAIFormatChannel.value ? "/v1/videos" : currentMode.value.path);
+const endpointPath = computed(() => isZhipuCogVideoChannel.value ? "/videos/generations" : isDimleapHappyhorseChannel.value ? "/v1/video/generations" : isLingyaSoraChannel.value ? "/v1/video/create" : isYunwuViduChannel.value ? (videoImages.value.length >= 2 ? "/ent/v2/start-end2video" : "/ent/v2/img2video") : isYunwuUnifiedVideoChannel.value ? "/v1/video/create" : isGrokOpenAIFormatChannel.value || isVeoOpenAIFormatChannel.value ? "/v1/videos" : currentMode.value.path);
 const statusEndpointPath = computed(() => {
   if (!isVideoMode.value) return "";
   if (isZhipuCogVideoChannel.value) return "/async-result/{id}";
+  if (isDimleapHappyhorseChannel.value) return "/v1/videos/{id}";
   if (isVeoOpenAIFormatChannel.value) return "/v1/videos/{id}";
+  if (isYunwuViduChannel.value) return "/ent/v2/tasks/{id}/creations";
+  if (isLingyaSoraChannel.value) return "/v1/video/query?id={id}";
   if (isYunwuUnifiedVideoChannel.value || isGrokOpenAIFormatChannel.value) return "/v1/video/query?id={id}";
   return "/v2/videos/generations/{id}";
 });
@@ -396,6 +568,12 @@ const videoImages = computed(() => {
   const values = videoImageUrls.value.map((url: string) => url.trim()).filter(Boolean);
   const filtered = isVeoOpenAIFormatChannel.value
     ? values
+    : isLingyaSoraChannel.value
+    ? values.filter((url: string) => /^https?:\/\//i.test(url))
+    : isYunwuViduChannel.value
+    ? values.filter((url: string) => /^https?:\/\//i.test(url) || /^data:image\//i.test(url))
+    : isDimleapHappyhorseChannel.value
+    ? values.filter((url: string) => /^https?:\/\//i.test(url))
     : isGrokOpenAIFormatChannel.value
     ? values.filter((url: string) => /^data:image\//i.test(url))
     : isYunwuUnifiedVideoChannel.value
@@ -416,7 +594,7 @@ const apiBaseWarning = computed(() => {
 const imageSource = computed(() => imageDataUrl.value || imageUrl.value.trim());
 const historyImageOptions = computed(() => {
   return historyRecords.value.flatMap((record: ChatHistoryRecord) => {
-    return record.images.map((url: string, index: number) => ({
+    return historyRecordImageUrls(record).map((url: string, index: number) => ({
       key: `${record.id}:${index}`,
       url,
       label: `${formatHistoryTime(record.createdAt)} · ${promptSummary(record.prompt)} · ${index + 1}`,
@@ -476,6 +654,27 @@ const copy = computed(() => {
     lastFrame: zh ? "尾帧" : "Last Frame",
     veoOpenAIReferenceHint: zh ? "VEO OpenAI 格式必须提交首帧和尾帧 2 张 input_reference，可填写图片 URL、上传本地图片，或从历史图片中选择。" : "The VEO OpenAI format requires two input_reference images: first frame and last frame. Enter image URLs, upload local images, or choose from history.",
     zhipuReferenceHint: zh ? "智谱 CogVideoX-3 可不传图做文生视频，也可传 1 张参考图或 2 张首尾帧；图片支持 URL 或本地上传转 base64。" : "Zhipu CogVideoX-3 can run text-to-video, one reference image, or two first-last-frame images. Images can be URLs or uploaded as base64.",
+    lingyaSoraParamHint: zh ? "灵芽 Sora unified 会提交 model、prompt、images、orientation、size 和 duration；当前初版只支持图片 URL，不上传本地 base64。" : "Lingya Sora unified submits model, prompt, images, orientation, size, and duration. This first version supports image URLs only, not local base64 uploads.",
+    yunwuViduParamHint: zh ? "云雾 Vidu 支持 viduq3-turbo 和 viduq2-turbo；可填写图片 URL，本地上传会先归档为云端 URL。1 张图调用图生视频，2 张图调用首尾帧。" : "Yunwu Vidu supports viduq3-turbo and viduq2-turbo. Use image URLs; local uploads are archived to cloud URLs first. One image calls image-to-video; two images call start/end-to-video.",
+    yunwuViduMovement: zh ? "运动幅度" : "Movement",
+    yunwuViduSeed: zh ? "随机种子" : "Seed",
+    yunwuViduAudio: zh ? "音视频直出" : "Audio",
+    yunwuViduAudioType: zh ? "音频类型" : "Audio Type",
+    yunwuViduVoiceId: zh ? "音色 ID" : "Voice ID",
+    yunwuViduIsRec: zh ? "推荐提示词" : "Prompt Rec",
+    yunwuViduBgm: zh ? "背景音乐" : "BGM",
+    yunwuViduOffPeak: zh ? "错峰模式" : "Off Peak",
+    yunwuViduWatermark: zh ? "水印" : "Watermark",
+    yunwuViduWatermarkPosition: zh ? "水印位置" : "Watermark Position",
+    yunwuViduWatermarkUrl: zh ? "水印图片 URL" : "Watermark URL",
+    yunwuViduMetaData: zh ? "元数据 meta_data" : "Meta Data",
+    yunwuViduPayload: zh ? "透传 payload" : "Payload",
+    dimleapHappyhorseParamHint: zh ? "Dimleap Happyhorse 会提交 model、prompt、size、duration 和 metadata；i2v 使用首帧图，r2v 使用 1-9 张参考图，图片必须是公网 URL。" : "Dimleap Happyhorse submits model, prompt, size, duration, and metadata. i2v uses one first-frame image; r2v uses 1-9 reference images. Images must be public URLs.",
+    dimleapHappyhorseReferenceHint: zh ? (isDimleapHappyhorseR2vModel.value ? "Dimleap Happyhorse happyhorse-1.0-r2v 需要 1-9 张可公网访问的参考图片 URL，用于引导角色与画风。" : "Dimleap Happyhorse happyhorse-1.0-i2v 必须填写 1 张可公网访问的首帧图片 URL。") : (isDimleapHappyhorseR2vModel.value ? "Dimleap Happyhorse happyhorse-1.0-r2v requires 1-9 public reference image URLs to guide character and style." : "Dimleap Happyhorse happyhorse-1.0-i2v requires one public first-frame image URL."),
+    dimleapHappyhorseWatermark: zh ? "水印" : "Watermark",
+    dimleapHappyhorseSeedEnabled: zh ? "固定随机种子" : "Fixed Seed",
+    dimleapHappyhorseSeed: zh ? "随机种子" : "Seed",
+    callbackUrl: zh ? "回调 URL" : "Callback URL",
     zhipuQuality: zh ? "输出模式" : "Output Mode",
     zhipuWithAudio: zh ? "生成音效" : "Generate Audio",
     zhipuWatermark: zh ? "水印" : "Watermark",
@@ -494,6 +693,17 @@ const copy = computed(() => {
     b64Json: zh ? "b64_json" : "b64_json",
     reset: zh ? "重置" : "Reset",
     generate: zh ? "生成" : "Generate",
+    send: zh ? "发送" : "Send",
+    stop: zh ? "停止" : "Stop",
+    copyMessage: zh ? "复制" : "Copy",
+    copied: zh ? "已复制" : "Copied",
+    regenerate: zh ? "重新生成" : "Regenerate",
+    retry: zh ? "重试" : "Retry",
+    stopped: zh ? "已停止" : "Stopped",
+    newChat: zh ? "新对话" : "New Chat",
+    chatPlaceholder: zh ? "输入消息" : "Message",
+    chatgptPlaceholder: zh ? "ChatGPT 对话走 OpenAI Responses API，按官方推荐使用 /responses。" : "ChatGPT chat uses the OpenAI Responses API at /responses.",
+    zhipuChatHint: zh ? "智谱对话走 /chat/completions，当前只开放 demo 配置中的三种模型。" : "Zhipu chat uses /chat/completions and only exposes the three demo models.",
     submitAsync: zh ? "提交异步任务" : "Submit Async Task",
     generating: zh ? "生成中..." : "Generating...",
     requestJson: zh ? "请求 JSON" : "Request JSON",
@@ -568,6 +778,37 @@ const sanitizedRequest = computed(() => {
       base.with_audio = zhipuWithAudio.value;
       base.watermark_enabled = zhipuWatermarkEnabled.value;
       if (videoImages.value.length) base.image_url = videoImages.value.length > 1 ? videoImages.value : videoImages.value[0];
+    } else if (isLingyaSoraChannel.value) {
+      base.orientation = grokAspectRatio.value === "9:16" || grokAspectRatio.value === "3:4" || grokAspectRatio.value === "2:3" ? "portrait" : "landscape";
+      base.size = grokResolution.value;
+      base.duration = grokDuration.value;
+      base.images = videoImages.value;
+    } else if (isYunwuViduChannel.value) {
+      base.images = videoImages.value;
+      base.mode = videoImages.value.length >= 2 ? "start-end-to-video" : "image-to-video";
+      base.duration = yunwuViduDuration.value;
+      base.resolution = yunwuViduResolution.value;
+      base.movement_amplitude = yunwuViduMovementAmplitude.value;
+      base.seed = yunwuViduSeed.value;
+      base.audio = yunwuViduAudio.value;
+      base.audio_type = yunwuViduAudioType.value;
+      if (yunwuViduVoiceId.value.trim()) base.voice_id = yunwuViduVoiceId.value.trim();
+      base.is_rec = yunwuViduIsRec.value;
+      base.bgm = yunwuViduBgm.value;
+      base.off_peak = yunwuViduOffPeak.value;
+      base.watermark = yunwuViduWatermark.value;
+      base.wm_position = yunwuViduWatermarkPosition.value;
+      if (yunwuViduWatermarkUrl.value.trim()) base.wm_url = yunwuViduWatermarkUrl.value.trim();
+      if (yunwuViduMetaData.value.trim()) base.meta_data = yunwuViduMetaData.value.trim();
+      if (yunwuViduPayload.value.trim()) base.payload = yunwuViduPayload.value.trim();
+      if (yunwuViduCallbackUrl.value.trim()) base.callback_url = yunwuViduCallbackUrl.value.trim();
+    } else if (isDimleapHappyhorseChannel.value) {
+      base.images = videoImages.value;
+      if (isDimleapHappyhorseR2vModel.value) base.size = grokAspectRatio.value;
+      base.duration = grokDuration.value;
+      base.resolution = grokResolution.value;
+      base.watermark = dimleapHappyhorseWatermark.value;
+      if (dimleapHappyhorseSeedEnabled.value) base.seed = dimleapHappyhorseSeed.value;
     } else if (isYunwuVideoChannel.value) {
       if (isVeoOpenAIFormatChannel.value) {
         base.size = grokAspectRatio.value;
@@ -617,13 +858,13 @@ const sanitizedRequest = computed(() => {
 
 const requestJson = computed(() => JSON.stringify(sanitizedRequest.value, null, 2));
 const responseText = computed(() => responseJson.value ? JSON.stringify(responseJson.value, null, 2) : "");
-const submitLabel = computed(() => isVideoMode.value ? copy.value.submitAsync : executionMode.value === "async" ? copy.value.submitAsync : copy.value.generate);
+const submitLabel = computed(() => isDialogueMode.value ? copy.value.send : isVideoMode.value ? copy.value.submitAsync : executionMode.value === "async" ? copy.value.submitAsync : copy.value.generate);
 
 function buildPreviewEndpoint(baseRaw: string, path: string) {
   const base = baseRaw.trim().replace(/\/+$/, "");
   if (!base) return path;
   if (base.endsWith(path)) return base;
-  const withoutKnownEndpoint = base.replace(/\/v[12]\/(?:(?:images|videos)\/(?:generations(?:\/[^/]+)?|edits)|videos(?:\/[^/]+)?|chat\/completions)$/i, "");
+  const withoutKnownEndpoint = base.replace(/\/v[12]\/(?:(?:images|videos)\/(?:generations(?:\/[^/]+)?|edits)|video\/generations|videos(?:\/[^/]+)?|chat\/completions)$/i, "");
   return withoutKnownEndpoint + path;
 }
 
@@ -667,6 +908,84 @@ function isApifoxDocumentationBase(value: string) {
   }
 }
 
+function isDataImageUrl(value: string) {
+  return /^data:image\//i.test(value.trim());
+}
+
+function isStoredImageUrl(value: string) {
+  const raw = value.trim();
+  return Boolean(raw) && !isDataImageUrl(raw) && (/^https?:\/\//i.test(raw) || raw.startsWith("/"));
+}
+
+function b64JsonToDataImageUrl(value: unknown) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (isDataImageUrl(raw)) return raw;
+  const mimeType = raw.startsWith("/9j/")
+    ? "image/jpeg"
+    : raw.startsWith("UklGR")
+      ? "image/webp"
+      : raw.startsWith("R0lGOD")
+        ? "image/gif"
+        : "image/png";
+  return `data:${mimeType};base64,${raw}`;
+}
+
+function pushHistoryImageCandidate(urls: string[], value: unknown) {
+  const raw = String(value || "").trim();
+  if (!raw) return;
+  if (isDataImageUrl(raw) || /^https?:\/\//i.test(raw) || raw.startsWith("/")) {
+    urls.push(raw);
+    return;
+  }
+  HISTORY_IMAGE_URL_RE.lastIndex = 0;
+  for (const match of raw.matchAll(HISTORY_IMAGE_URL_RE)) {
+    if (match[0]) urls.push(match[0]);
+  }
+}
+
+function extractHistoryImageUrls(value: unknown, urls: string[] = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) extractHistoryImageUrls(item, urls);
+    return urls;
+  }
+  if (typeof value === "string") {
+    pushHistoryImageCandidate(urls, value);
+    return urls;
+  }
+  if (!value || typeof value !== "object") return urls;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "b64_json") {
+      const dataUrl = b64JsonToDataImageUrl(item);
+      if (dataUrl) urls.push(dataUrl);
+    } else if (STRUCTURED_HISTORY_IMAGE_KEY_RE.test(key)) {
+      pushHistoryImageCandidate(urls, item);
+    }
+    extractHistoryImageUrls(item, urls);
+  }
+  return urls;
+}
+
+function preferStoredImageUrls(urls: string[]) {
+  const unique = Array.from(new Set(urls.map((url) => String(url || "").trim()).filter(Boolean)));
+  return [
+    ...unique.filter(isStoredImageUrl),
+    ...unique.filter((url) => !isStoredImageUrl(url)),
+  ];
+}
+
+function historyImageUrlsFromCandidates(values: unknown[]) {
+  return preferStoredImageUrls(values.flatMap((value) => extractHistoryImageUrls(value)));
+}
+
+function historyRecordImageUrls(record: ChatHistoryRecord) {
+  return preferStoredImageUrls([record.coverUrl, ...record.images]);
+}
+
+function historyCoverUrl(record: ChatHistoryRecord) {
+  return historyRecordImageUrls(record)[0] || "";
+}
+
 function sanitizeHistoryRecord(record: unknown): ChatHistoryRecord | null {
   if (!record || typeof record !== "object") return null;
   const item = record as Partial<ChatHistoryRecord>;
@@ -675,7 +994,11 @@ function sanitizeHistoryRecord(record: unknown): ChatHistoryRecord | null {
   const status = normalizeRecordStatus(item.status, item.taskId);
   const kind = item.kind === "async" || item.taskId ? "async" : "sync";
   const mediaType: MediaType = item.mediaType === "video" || item.mode === "video" ? "video" : "image";
-  const images = Array.isArray(item.images) ? item.images.map((url) => String(url || "").trim()).filter(Boolean) : [];
+  const images = historyImageUrlsFromCandidates([
+    ...(Array.isArray(item.images) ? item.images : []),
+    item.coverUrl,
+    item.response,
+  ]);
   const videos = Array.isArray(item.videos) ? item.videos.map((url) => String(url || "").trim()).filter(Boolean) : [];
   const recordBase = String(item.base || "");
   const imageEntryValue: ImageEntryKey = mediaType === "image" && (item.imageEntry === "custom" || (recordBase && !apiBaseOptions.includes(recordBase)))
@@ -713,13 +1036,20 @@ function sanitizeHistoryRecord(record: unknown): ChatHistoryRecord | null {
             ? "veo-openai"
             : String(item.videoChannel || "") === "zhipu-cogvideo"
               ? "zhipu-cogvideo"
-              : "veo",
+              : String(item.videoChannel || "") === "lingya-sora"
+                ? "lingya-sora"
+            : String(item.videoChannel || "") === "yunwu-vidu"
+              ? "yunwu-vidu"
+              : String(item.videoChannel || "") === "dimleap-happyhorse" || String(item.videoChannel || "") === "dimleap" || String(item.videoChannel || "") === "happyhorse-1.0-i2v" || String(item.videoChannel || "") === "happyhorse-1.0-r2v"
+                ? "dimleap-happyhorse"
+                : "veo",
     grokReferenceMode: String((item as any).grokReferenceMode || "") === "multi" ? "multi" : "single",
     videoImages: Array.isArray(item.videoImages) ? item.videoImages.map((url) => String(url || "").trim()).filter(Boolean) : [],
-    coverUrl: String(item.coverUrl || images[0] || ""),
+    coverUrl: preferStoredImageUrls([String(item.coverUrl || ""), ...images])[0] || "",
     images,
     videos,
     response: item.response ?? null,
+    config: item.config && typeof item.config === "object" && !Array.isArray(item.config) ? item.config as Record<string, unknown> : {},
   };
 }
 
@@ -826,12 +1156,13 @@ function migrateLegacyApiKeys() {
 }
 
 function activeApiKeyStorageKey() {
+  if (isDialogueMode.value) return `chat:${dialogueProvider.value}`;
   if (isVideoMode.value) return `video:${videoChannel.value}`;
   return imageEntry.value === "custom" ? "custom-image" : "official-image";
 }
 
 function activeApiKeyRef() {
-  return imageEntry.value === "custom" && !isVideoMode.value ? customImageApiKey : apiKey;
+  return imageEntry.value === "custom" && isImageMode.value ? customImageApiKey : apiKey;
 }
 
 function syncActiveApiKeyFromStorage() {
@@ -901,6 +1232,197 @@ function loadCustomImageProvider() {
   }
 }
 
+function compactCachedStringArray(value: unknown, limit: number) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && item.length <= 2_000_000)
+    .slice(0, limit);
+}
+
+function fixedCachedStringArray(value: unknown, length: number) {
+  const items = compactCachedStringArray(value, length);
+  return Array.from({ length }, (_item, index) => items[index] || "");
+}
+
+function fixedCachedNullableStringArray(value: unknown, length: number) {
+  const items = Array.isArray(value)
+    ? value.map((item) => String(item || "").trim()).slice(0, length)
+    : [];
+  return Array.from({ length }, (_item, index) => items[index] || "");
+}
+
+function sanitizeDialogueMessage(value: unknown): DialogueMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Partial<DialogueMessage>;
+  const role = item.role === "assistant" ? "assistant" : item.role === "user" ? "user" : "";
+  const content = String(item.content || "").trim();
+  const reasoningContent = typeof item.reasoningContent === "string" && item.reasoningContent.length <= 40_000 ? item.reasoningContent : undefined;
+  if (!role || (!content && !reasoningContent?.trim()) || content.length > 40_000) return null;
+  return {
+    id: String(item.id || newHistoryId()),
+    role,
+    content,
+    createdAt: String(item.createdAt || new Date().toISOString()),
+    model: typeof item.model === "string" ? item.model : undefined,
+    reasoningContent,
+    streamStatus: item.streamStatus === "connected" || item.streamStatus === "receiving" || item.streamStatus === "done" || item.streamStatus === "failed" ? item.streamStatus : undefined,
+    streamChunkCount: Number.isFinite(Number(item.streamChunkCount)) ? Number(item.streamChunkCount) : undefined,
+    reasoningExpanded: typeof item.reasoningExpanded === "boolean" ? item.reasoningExpanded : undefined,
+    stopped: typeof item.stopped === "boolean" ? item.stopped : undefined,
+  };
+}
+
+function dialogueModelOptionsForProvider(provider: DialogueProviderKey) {
+  return provider === "zhipu" ? zhipuDialogueModelOptions : chatgptDialogueModelOptions;
+}
+
+function safeDialogueModelForProvider(provider: DialogueProviderKey, value: unknown) {
+  const raw = String(value || "").trim();
+  return dialogueModelOptionsForProvider(provider).includes(raw) ? raw : defaultDialogueModelForProvider(provider);
+}
+
+function safeDialogueBaseForProvider(provider: DialogueProviderKey, value: unknown) {
+  const raw = String(value || "").trim();
+  return raw && raw.length <= 500 ? raw : DIALOGUE_API_BASE_BY_PROVIDER[provider];
+}
+
+function sanitizeDialogueProviderState(value: unknown, provider: DialogueProviderKey): DialogueProviderState {
+  const state = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const input = typeof state.input === "string" && state.input.length <= 20_000 ? state.input : "";
+  const messages = Array.isArray(state.messages)
+    ? state.messages
+        .map((item) => sanitizeDialogueMessage(item))
+        .filter(Boolean)
+        .slice(-50) as DialogueMessage[]
+    : [];
+  return {
+    input,
+    messages,
+    model: safeDialogueModelForProvider(provider, state.model),
+    base: safeDialogueBaseForProvider(provider, state.base),
+  };
+}
+
+function currentDialogueProviderStates() {
+  const states: Record<DialogueProviderKey, DialogueProviderState> = {
+    chatgpt: sanitizeDialogueProviderState(dialogueProviderStates.value.chatgpt, "chatgpt"),
+    zhipu: sanitizeDialogueProviderState(dialogueProviderStates.value.zhipu, "zhipu"),
+  };
+  states[dialogueProvider.value] = {
+    input: dialogueInput.value,
+    messages: dialogueMessages.value.slice(-50),
+    model: safeDialogueModelForProvider(dialogueProvider.value, model.value),
+    base: safeDialogueBaseForProvider(dialogueProvider.value, dialogueBaseUrl.value),
+  };
+  return states;
+}
+
+function syncCurrentDialogueProviderState() {
+  if (loadingUiState || restoringDialogueProviderState) return;
+  dialogueProviderStates.value = currentDialogueProviderStates();
+}
+
+function restoreDialogueProviderState(provider: DialogueProviderKey) {
+  const state = sanitizeDialogueProviderState(dialogueProviderStates.value[provider], provider);
+  restoringDialogueProviderState = true;
+  try {
+    dialogueInput.value = state.input;
+    dialogueBaseUrl.value = state.base;
+    dialogueMessages.value = state.messages;
+    model.value = state.model;
+    responseJson.value = null;
+    errorMessage.value = "";
+  } finally {
+    restoringDialogueProviderState = false;
+  }
+  resizeDialogueInput();
+  scrollDialogueToBottom(true);
+}
+
+function persistChatUiState() {
+  if (!import.meta.client || loadingUiState) return;
+  try {
+    const nextDialogueProviderStates = currentDialogueProviderStates();
+    const data = {
+      mode: mode.value,
+      imageEntry: imageEntry.value,
+      customImageMode: customImageMode.value,
+      executionMode: executionMode.value,
+      selectedHistoryImageKey: selectedHistoryImageKey.value,
+      generationImageUrls: generationImageUrls.value,
+      selectedGenerationHistoryImageKeys: selectedGenerationHistoryImageKeys.value,
+      imageUrl: imageUrl.value,
+      videoChannel: videoChannel.value,
+      grokReferenceMode: grokReferenceMode.value,
+      grokInputReference: grokInputReference.value,
+      selectedGrokHistoryImageKey: selectedGrokHistoryImageKey.value,
+      videoImageUrls: videoImageUrls.value,
+      selectedVideoHistoryImageKeys: selectedVideoHistoryImageKeys.value,
+      dialogueProvider: dialogueProvider.value,
+      dialogueModel: nextDialogueProviderStates[dialogueProvider.value].model,
+      dialogueBaseUrl: nextDialogueProviderStates[dialogueProvider.value].base,
+      dialogueInput: nextDialogueProviderStates[dialogueProvider.value].input,
+      dialogueMessages: nextDialogueProviderStates[dialogueProvider.value].messages,
+      dialogueProviderStates: nextDialogueProviderStates,
+      dialogueSidebarCollapsed: dialogueSidebarCollapsed.value,
+      historyDrawerOpen: historyDrawerOpen.value,
+    };
+    localStorage.setItem(CHAT_UI_STATE_STORAGE_KEY, JSON.stringify(data));
+  } catch {}
+}
+
+function loadChatUiState() {
+  if (!import.meta.client) return;
+  loadingUiState = true;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CHAT_UI_STATE_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const state = parsed as Record<string, unknown>;
+    if (state.mode === "generation" || state.mode === "edit" || state.mode === "image-chat" || state.mode === "text-chat" || state.mode === "video" || state.mode === "dialogue") mode.value = state.mode;
+    if (state.imageEntry === "official" || state.imageEntry === "custom") imageEntry.value = state.imageEntry;
+    if (state.customImageMode === "text-to-image" || state.customImageMode === "image-to-image") customImageMode.value = state.customImageMode;
+    if (state.executionMode === "sync" || state.executionMode === "async") executionMode.value = state.executionMode;
+    if (typeof state.selectedHistoryImageKey === "string") selectedHistoryImageKey.value = state.selectedHistoryImageKey;
+    const restoredGenerationUrls = compactCachedStringArray(state.generationImageUrls, 10);
+    generationImageUrls.value = restoredGenerationUrls.length ? restoredGenerationUrls : [""];
+    selectedGenerationHistoryImageKeys.value = fixedCachedNullableStringArray(state.selectedGenerationHistoryImageKeys, generationImageUrls.value.length);
+    if (typeof state.imageUrl === "string" && state.imageUrl.length <= 2_000_000) imageUrl.value = state.imageUrl;
+    if (typeof state.videoChannel === "string" && VIDEO_API_BASE_BY_CHANNEL[state.videoChannel as VideoChannelKey]) videoChannel.value = state.videoChannel as VideoChannelKey;
+    if (state.grokReferenceMode === "single" || state.grokReferenceMode === "multi") grokReferenceMode.value = state.grokReferenceMode;
+    if (typeof state.grokInputReference === "string" && state.grokInputReference.length <= 2_000_000) grokInputReference.value = state.grokInputReference;
+    if (typeof state.selectedGrokHistoryImageKey === "string") selectedGrokHistoryImageKey.value = state.selectedGrokHistoryImageKey;
+    videoImageUrls.value = fixedCachedStringArray(state.videoImageUrls, VIDEO_IMAGE_CACHE_LIMIT);
+    selectedVideoHistoryImageKeys.value = fixedCachedNullableStringArray(state.selectedVideoHistoryImageKeys, VIDEO_IMAGE_CACHE_LIMIT);
+    if (state.dialogueProvider === "chatgpt" || state.dialogueProvider === "zhipu") dialogueProvider.value = state.dialogueProvider;
+    const rawDialogueStates = state.dialogueProviderStates && typeof state.dialogueProviderStates === "object" && !Array.isArray(state.dialogueProviderStates)
+      ? state.dialogueProviderStates as Record<string, unknown>
+      : {};
+    const restoredDialogueStates: Record<DialogueProviderKey, DialogueProviderState> = {
+      chatgpt: sanitizeDialogueProviderState(rawDialogueStates.chatgpt, "chatgpt"),
+      zhipu: sanitizeDialogueProviderState(rawDialogueStates.zhipu, "zhipu"),
+    };
+    if (!rawDialogueStates[dialogueProvider.value]) {
+      restoredDialogueStates[dialogueProvider.value] = sanitizeDialogueProviderState({
+        input: state.dialogueInput,
+        messages: state.dialogueMessages,
+        model: state.dialogueModel,
+        base: state.dialogueBaseUrl,
+      }, dialogueProvider.value);
+    }
+    dialogueProviderStates.value = restoredDialogueStates;
+    if (typeof state.dialogueSidebarCollapsed === "boolean") dialogueSidebarCollapsed.value = state.dialogueSidebarCollapsed;
+    if (typeof state.historyDrawerOpen === "boolean") historyDrawerOpen.value = state.historyDrawerOpen;
+    restoreDialogueProviderState(dialogueProvider.value);
+    if (!activeModelOptions.value.includes(model.value)) {
+      model.value = isDialogueMode.value ? defaultDialogueModelForProvider(dialogueProvider.value) : isVideoMode.value ? defaultVideoModelForChannel(videoChannel.value) : defaultImageModelForEntry(imageEntry.value);
+    }
+  } catch {
+  } finally {
+    loadingUiState = false;
+  }
+}
+
 function newHistoryId() {
   if (import.meta.client && typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -918,8 +1440,17 @@ function imageEntryLabel(entry: ImageEntryKey) {
   return lang.value === "zh" ? option.labelZh : option.labelEn;
 }
 
+function dialogueProviderLabel(provider: DialogueProviderKey) {
+  if (provider === "chatgpt") return "ChatGPT";
+  return lang.value === "zh" ? "智谱" : "Zhipu";
+}
+
 function defaultImageModelForEntry(entry: ImageEntryKey) {
   return entry === "custom" ? CUSTOM_IMAGE_DEFAULT_MODEL : OFFICIAL_IMAGE_DEFAULT_MODEL;
+}
+
+function defaultDialogueModelForProvider(provider: DialogueProviderKey) {
+  return provider === "zhipu" ? "glm-4.7" : "gpt-5.5";
 }
 
 function defaultVideoModelForChannel(channel: VideoChannelKey) {
@@ -928,6 +1459,9 @@ function defaultVideoModelForChannel(channel: VideoChannelKey) {
   if (channel === "veo-unified") return "veo3.1-fast-components";
   if (channel === "veo-openai") return "veo_3_1-fast";
   if (channel === "zhipu-cogvideo") return "cogvideox-3";
+  if (channel === "lingya-sora") return "sora-2-all-vip-15s";
+  if (channel === "yunwu-vidu") return "viduq3-turbo";
+  if (channel === "dimleap-happyhorse") return "happyhorse-1.0-i2v";
   return "veo3.1-fast";
 }
 
@@ -937,7 +1471,7 @@ function keyForRecord(record: ChatHistoryRecord) {
 
 function selectImageMode() {
   switchActiveApiKey(() => {
-    if (isVideoMode.value) {
+    if (!isImageMode.value) {
       mode.value = "generation";
     }
   });
@@ -946,6 +1480,26 @@ function selectImageMode() {
 function selectVideoMode() {
   switchActiveApiKey(() => {
     mode.value = "video";
+  });
+}
+
+function selectDialogueMode() {
+  switchActiveApiKey(() => {
+    mode.value = "dialogue";
+    restoreDialogueProviderState(dialogueProvider.value);
+  });
+}
+
+function selectDialogueProvider(provider: DialogueProviderKey) {
+  if (provider === dialogueProvider.value) {
+    mode.value = "dialogue";
+    return;
+  }
+  syncCurrentDialogueProviderState();
+  switchActiveApiKey(() => {
+    dialogueProvider.value = provider;
+    mode.value = "dialogue";
+    restoreDialogueProviderState(provider);
   });
 }
 
@@ -964,6 +1518,21 @@ function selectVideoChannel(channel: VideoChannelKey) {
     videoChannel.value = channel;
     if (!activeModelOptions.value.includes(model.value)) {
       model.value = defaultVideoModelForChannel(channel);
+    }
+    if (channel === "lingya-sora") {
+      grokAspectRatio.value = "16:9";
+      grokResolution.value = "large";
+      grokDuration.value = 15;
+    }
+    if (channel === "yunwu-vidu") {
+      videoImageUrls.value = ["", "", ""];
+      selectedVideoHistoryImageKeys.value = ["", "", ""];
+    }
+    if (channel === "dimleap-happyhorse") {
+      grokDuration.value = 3;
+      grokResolution.value = "720P";
+      videoImageUrls.value = ["", "", ""];
+      selectedVideoHistoryImageKeys.value = ["", "", ""];
     }
   });
 }
@@ -1012,6 +1581,7 @@ function mediaLabel(record: ChatHistoryRecord) {
 }
 
 function videoFrameLabel(index: number) {
+  if (isLingyaSoraChannel.value) return copy.value.imageUrl;
   if (!isVeoOpenAIFormatChannel.value && !isZhipuCogVideoChannel.value) return `${copy.value.imageUrl} ${index + 1}`;
   return index === 0 ? copy.value.firstFrame : copy.value.lastFrame;
 }
@@ -1088,7 +1658,7 @@ function selectGrokHistoryImage() {
 }
 
 function saveHistoryRecord(data: unknown, images: string[]) {
-  const normalizedImages = images.map((url) => String(url || "").trim()).filter(Boolean);
+  const normalizedImages = historyImageUrlsFromCandidates([...images, data]);
   if (!normalizedImages.length) return;
   const now = new Date().toISOString();
   const record: ChatHistoryRecord = {
@@ -1120,16 +1690,212 @@ function saveHistoryRecord(data: unknown, images: string[]) {
     images: normalizedImages,
     videos: [],
     response: data,
+    config: currentHistoryConfig(),
   };
   historyRecords.value = [record, ...historyRecords.value.filter((item: ChatHistoryRecord) => item.id !== record.id)].slice(0, HISTORY_LIMIT);
   activeHistoryId.value = record.id;
   persistHistory();
+  publishGenerationContext(record);
+}
+
+function displayImageUrl(url: string) {
+  const value = String(url || "").trim();
+  if (!/^http:\/\//i.test(value)) return value;
+  return "/api/chat/image-preview?url=" + encodeURIComponent(value);
+}
+
+function saveGptImageHistory(payload: GptImageGeneratedPayload) {
+  const normalizedImages = historyImageUrlsFromCandidates([...payload.images, payload.data]);
+  if (!normalizedImages.length) return;
+  const now = new Date().toISOString();
+  const record: ChatHistoryRecord = {
+    id: newHistoryId(),
+    kind: "sync",
+    mediaType: "image",
+    imageEntry: "custom",
+    createdAt: now,
+    updatedAt: now,
+    mode: payload.imageMode === "image-to-image" ? "edit" : "generation",
+    model: payload.model,
+    base: payload.base,
+    imageEndpoint: payload.imageEndpoint,
+    prompt: payload.prompt,
+    size: payload.size,
+    quality: payload.quality,
+    n: payload.count,
+    taskId: "",
+    status: "SYNC_SUCCESS",
+    progress: "",
+    failReason: "",
+    upstreamUrl: typeof (payload.data as any)?.upstreamUrl === "string" ? (payload.data as any).upstreamUrl : "",
+    imageInputLabel: payload.sourceImages.length ? "gpt生图输入图片" : "",
+    imageInputValue: payload.sourceImages.join("\n"),
+    videoChannel: "veo",
+    grokReferenceMode: "single",
+    videoImages: [],
+    coverUrl: normalizedImages[0],
+    images: normalizedImages,
+    videos: [],
+    response: payload.data,
+    config: {
+      ...currentHistoryConfig(),
+      imageEntry: "custom",
+      customImageMode: payload.imageMode,
+      customImageBaseUrl: payload.base,
+      customImageEndpointPath: payload.imageEndpoint,
+      generationImageUrls: payload.sourceImages,
+    },
+  };
+  historyRecords.value = [record, ...historyRecords.value.filter((item: ChatHistoryRecord) => item.id !== record.id)].slice(0, HISTORY_LIMIT);
+  activeHistoryId.value = record.id;
+  persistHistory();
+  publishGenerationContext(record);
 }
 
 function upsertHistoryRecord(record: ChatHistoryRecord) {
   historyRecords.value = [record, ...historyRecords.value.filter((item: ChatHistoryRecord) => item.id !== record.id)].slice(0, HISTORY_LIMIT);
   activeHistoryId.value = record.id;
   persistHistory();
+  publishGenerationContext(record);
+}
+
+function currentHistoryConfig(): Record<string, unknown> {
+  return {
+    imageEntry: imageEntry.value,
+    executionMode: executionMode.value,
+    customImageMode: customImageMode.value,
+    baseUrl: baseUrl.value,
+    customImageBaseUrl: customImageBaseUrl.value,
+    customImageEndpointPath: customImageEndpointPath.value,
+    b64Json: b64Json.value,
+    generationImageUrls: [...generationImageUrls.value],
+    imageUrl: imageUrl.value,
+    videoChannel: videoChannel.value,
+    grokReferenceMode: grokReferenceMode.value,
+    grokInputReference: grokInputReference.value,
+    videoImageUrls: [...videoImageUrls.value],
+    grokAspectRatio: grokAspectRatio.value,
+    grokDuration: grokDuration.value,
+    grokResolution: grokResolution.value,
+    veoEnhancePrompt: veoEnhancePrompt.value,
+    veoEnableUpsample: veoEnableUpsample.value,
+    zhipuVideoQuality: zhipuVideoQuality.value,
+    zhipuVideoSize: zhipuVideoSize.value,
+    zhipuVideoFps: zhipuVideoFps.value,
+    zhipuVideoDuration: zhipuVideoDuration.value,
+    zhipuWithAudio: zhipuWithAudio.value,
+    zhipuWatermarkEnabled: zhipuWatermarkEnabled.value,
+    yunwuViduDuration: yunwuViduDuration.value,
+    yunwuViduResolution: yunwuViduResolution.value,
+    yunwuViduMovementAmplitude: yunwuViduMovementAmplitude.value,
+    yunwuViduSeed: yunwuViduSeed.value,
+    yunwuViduAudio: yunwuViduAudio.value,
+    yunwuViduAudioType: yunwuViduAudioType.value,
+    yunwuViduVoiceId: yunwuViduVoiceId.value,
+    yunwuViduIsRec: yunwuViduIsRec.value,
+    yunwuViduBgm: yunwuViduBgm.value,
+    yunwuViduOffPeak: yunwuViduOffPeak.value,
+    yunwuViduWatermark: yunwuViduWatermark.value,
+    yunwuViduWatermarkPosition: yunwuViduWatermarkPosition.value,
+    yunwuViduWatermarkUrl: yunwuViduWatermarkUrl.value,
+    yunwuViduMetaData: yunwuViduMetaData.value,
+    yunwuViduPayload: yunwuViduPayload.value,
+    yunwuViduCallbackUrl: yunwuViduCallbackUrl.value,
+    dimleapHappyhorseWatermark: dimleapHappyhorseWatermark.value,
+    dimleapHappyhorseSeedEnabled: dimleapHappyhorseSeedEnabled.value,
+    dimleapHappyhorseSeed: dimleapHappyhorseSeed.value,
+  };
+}
+
+function generationContextForRecord(record: ChatHistoryRecord): Record<string, unknown> {
+  return {
+    prompt: record.prompt,
+    provider: record.mediaType === "video" ? record.videoChannel : record.imageEntry,
+    model: record.model,
+    size: record.size,
+    quality: record.quality,
+    n: record.n,
+    mode: record.mode,
+    mediaType: record.mediaType,
+    imageEntry: record.imageEntry,
+    videoChannel: record.videoChannel,
+    upstreamUrl: record.upstreamUrl,
+    imageEndpoint: record.imageEndpoint,
+    config: record.config,
+  };
+}
+
+function publishGenerationContext(record: ChatHistoryRecord) {
+  if (!import.meta.client) return;
+  window.dispatchEvent(new CustomEvent("chat:generation-context", {
+    detail: generationContextForRecord(record),
+  }));
+}
+
+function configString(config: Record<string, unknown>, key: string, fallback = "") {
+  const value = config[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function configNumber(config: Record<string, unknown>, key: string, fallback: number) {
+  const value = Number(config[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function configBoolean(config: Record<string, unknown>, key: string, fallback: boolean) {
+  return typeof config[key] === "boolean" ? config[key] as boolean : fallback;
+}
+
+function configStringArray(config: Record<string, unknown>, key: string) {
+  return Array.isArray(config[key]) ? (config[key] as unknown[]).map((item) => String(item || "")).filter(Boolean) : [];
+}
+
+function applyHistoryConfig(record: ChatHistoryRecord) {
+  const config = record.config || {};
+  if (config.imageEntry === "official" || config.imageEntry === "custom") imageEntry.value = config.imageEntry;
+  if (config.executionMode === "sync" || config.executionMode === "async") executionMode.value = config.executionMode;
+  if (config.customImageMode === "text-to-image" || config.customImageMode === "image-to-image") customImageMode.value = config.customImageMode;
+  baseUrl.value = configString(config, "baseUrl", baseUrl.value);
+  customImageBaseUrl.value = configString(config, "customImageBaseUrl", customImageBaseUrl.value);
+  b64Json.value = configBoolean(config, "b64Json", b64Json.value);
+  const restoredGenerationUrls = configStringArray(config, "generationImageUrls");
+  if (restoredGenerationUrls.length) generationImageUrls.value = restoredGenerationUrls;
+  imageUrl.value = configString(config, "imageUrl", imageUrl.value);
+  if (config.videoChannel && VIDEO_API_BASE_BY_CHANNEL[config.videoChannel as VideoChannelKey]) videoChannel.value = config.videoChannel as VideoChannelKey;
+  if (config.grokReferenceMode === "single" || config.grokReferenceMode === "multi") grokReferenceMode.value = config.grokReferenceMode;
+  grokInputReference.value = configString(config, "grokInputReference", grokInputReference.value);
+  const restoredVideoUrls = configStringArray(config, "videoImageUrls");
+  if (restoredVideoUrls.length) videoImageUrls.value = [...restoredVideoUrls, "", "", ""].slice(0, 3);
+  grokAspectRatio.value = configString(config, "grokAspectRatio", grokAspectRatio.value);
+  grokDuration.value = configNumber(config, "grokDuration", grokDuration.value);
+  grokResolution.value = configString(config, "grokResolution", grokResolution.value);
+  veoEnhancePrompt.value = configBoolean(config, "veoEnhancePrompt", veoEnhancePrompt.value);
+  veoEnableUpsample.value = configBoolean(config, "veoEnableUpsample", veoEnableUpsample.value);
+  zhipuVideoQuality.value = configString(config, "zhipuVideoQuality", zhipuVideoQuality.value) as ZhipuVideoQuality;
+  zhipuVideoSize.value = configString(config, "zhipuVideoSize", zhipuVideoSize.value);
+  zhipuVideoFps.value = configNumber(config, "zhipuVideoFps", zhipuVideoFps.value);
+  zhipuVideoDuration.value = configNumber(config, "zhipuVideoDuration", zhipuVideoDuration.value);
+  zhipuWithAudio.value = configBoolean(config, "zhipuWithAudio", zhipuWithAudio.value);
+  zhipuWatermarkEnabled.value = configBoolean(config, "zhipuWatermarkEnabled", zhipuWatermarkEnabled.value);
+  yunwuViduDuration.value = configNumber(config, "yunwuViduDuration", yunwuViduDuration.value);
+  yunwuViduResolution.value = configString(config, "yunwuViduResolution", yunwuViduResolution.value);
+  yunwuViduMovementAmplitude.value = configString(config, "yunwuViduMovementAmplitude", yunwuViduMovementAmplitude.value);
+  yunwuViduSeed.value = configNumber(config, "yunwuViduSeed", yunwuViduSeed.value);
+  yunwuViduAudio.value = configBoolean(config, "yunwuViduAudio", yunwuViduAudio.value);
+  yunwuViduAudioType.value = configString(config, "yunwuViduAudioType", yunwuViduAudioType.value);
+  yunwuViduVoiceId.value = configString(config, "yunwuViduVoiceId", yunwuViduVoiceId.value);
+  yunwuViduIsRec.value = configBoolean(config, "yunwuViduIsRec", yunwuViduIsRec.value);
+  yunwuViduBgm.value = configBoolean(config, "yunwuViduBgm", yunwuViduBgm.value);
+  yunwuViduOffPeak.value = configBoolean(config, "yunwuViduOffPeak", yunwuViduOffPeak.value);
+  yunwuViduWatermark.value = configBoolean(config, "yunwuViduWatermark", yunwuViduWatermark.value);
+  yunwuViduWatermarkPosition.value = configNumber(config, "yunwuViduWatermarkPosition", yunwuViduWatermarkPosition.value);
+  yunwuViduWatermarkUrl.value = configString(config, "yunwuViduWatermarkUrl", yunwuViduWatermarkUrl.value);
+  yunwuViduMetaData.value = configString(config, "yunwuViduMetaData", yunwuViduMetaData.value);
+  yunwuViduPayload.value = configString(config, "yunwuViduPayload", yunwuViduPayload.value);
+  yunwuViduCallbackUrl.value = configString(config, "yunwuViduCallbackUrl", yunwuViduCallbackUrl.value);
+  dimleapHappyhorseWatermark.value = configBoolean(config, "dimleapHappyhorseWatermark", dimleapHappyhorseWatermark.value);
+  dimleapHappyhorseSeedEnabled.value = configBoolean(config, "dimleapHappyhorseSeedEnabled", dimleapHappyhorseSeedEnabled.value);
+  dimleapHappyhorseSeed.value = configNumber(config, "dimleapHappyhorseSeed", dimleapHappyhorseSeed.value);
 }
 
 function restoreHistory(record: ChatHistoryRecord) {
@@ -1165,10 +1931,14 @@ function restoreHistory(record: ChatHistoryRecord) {
   selectedGrokHistoryImageKey.value = "";
   videoImageUrls.value = [...record.videoImages, "", "", ""].slice(0, 3);
   selectedVideoHistoryImageKeys.value = ["", "", ""];
+  applyHistoryConfig(record);
+  selectedGenerationHistoryImageKeys.value = generationImageUrls.value.map(() => "");
+  selectedVideoHistoryImageKeys.value = ["", "", ""];
   responseJson.value = record.response;
   previewUrls.value = [...record.images];
   videoPreviewUrls.value = [...record.videos];
   errorMessage.value = "";
+  publishGenerationContext(record);
   if (record.kind === "async" && record.status === "IN_PROGRESS" && keyForRecord(record)) {
     startPolling(record.id);
   } else {
@@ -1204,28 +1974,58 @@ function clearHistory() {
   persistHistory();
 }
 
+function syncDialogueBodyClass(value = isDialogueMode.value) {
+  if (!import.meta.client) return;
+  document.body.classList.toggle("custom-chat-dialogue-mode", value);
+}
+
 onMounted(() => {
   loadApiKey();
   loadCustomImageProvider();
+  loadChatUiState();
   syncActiveApiKeyFromStorage();
   loadHistory();
+  syncDialogueBodyClass();
 });
 
 onBeforeUnmount(() => {
+  stopDialogue();
+  if (dialogueCopyTimer) clearTimeout(dialogueCopyTimer);
+  if (import.meta.client) document.body.classList.remove("custom-chat-dialogue-mode");
   stopPolling();
   stopCountdown();
 });
 
+watch(isDialogueMode, (value: boolean) => {
+  syncDialogueBodyClass(value);
+  if (value) resizeDialogueInput();
+});
+
+watch(dialogueInput, resizeDialogueInput);
+watch([dialogueInput, dialogueBaseUrl, dialogueMessages, model], () => {
+  if (isDialogueMode.value) syncCurrentDialogueProviderState();
+}, { deep: true });
+
 watch(mode, () => {
+  if (isDialogueMode.value && !activeModelOptions.value.includes(model.value)) {
+    model.value = defaultDialogueModelForProvider(dialogueProvider.value);
+  }
   if (isVideoMode.value && !activeModelOptions.value.includes(model.value)) {
     model.value = defaultVideoModelForChannel(videoChannel.value);
   }
-  if (!isVideoMode.value && !isCustomImageEntry.value && !modelOptions.includes(model.value)) {
+  if (isImageMode.value && !isCustomImageEntry.value && !modelOptions.includes(model.value)) {
     model.value = defaultImageModelForEntry(imageEntry.value);
   }
   if (!asyncAvailable.value && executionMode.value === "async") {
     executionMode.value = "sync";
     stopPolling();
+  }
+});
+
+watch(dialogueProvider, () => {
+  if (!isDialogueMode.value) return;
+  if (!activeModelOptions.value.includes(model.value)) {
+    model.value = defaultDialogueModelForProvider(dialogueProvider.value);
   }
 });
 
@@ -1257,6 +2057,28 @@ watch(videoChannel, () => {
     if (!zhipuVideoFpsOptions.includes(Number(zhipuVideoFps.value))) zhipuVideoFps.value = 30;
     if (!zhipuVideoDurationOptions.includes(Number(zhipuVideoDuration.value))) zhipuVideoDuration.value = 5;
   }
+  if (isLingyaSoraChannel.value) {
+    if (!bltVideoAspectRatioOptions.includes(grokAspectRatio.value)) grokAspectRatio.value = "16:9";
+    if (!lingyaSoraSizeOptions.includes(grokResolution.value)) grokResolution.value = "large";
+    grokDuration.value = 15;
+  }
+  if (isYunwuViduChannel.value) {
+    videoImageUrls.value = videoImageUrls.value.map((url: string) => /^https?:\/\//i.test(url.trim()) || /^data:image\//i.test(url.trim()) ? url : "");
+    selectedVideoHistoryImageKeys.value = selectedVideoHistoryImageKeys.value.map((key: string, index: number) => index < videoImageLimit.value ? key : "");
+    if (!currentYunwuViduDurationOptions.value.includes(Number(yunwuViduDuration.value))) yunwuViduDuration.value = Math.min(5, currentYunwuViduDurationOptions.value.at(-1) || 5);
+    if (!yunwuViduResolutionOptions.includes(yunwuViduResolution.value)) yunwuViduResolution.value = "540p";
+    if (!yunwuViduMovementAmplitudeOptions.includes(yunwuViduMovementAmplitude.value)) yunwuViduMovementAmplitude.value = "auto";
+    if (!yunwuViduAudioTypeOptions.includes(yunwuViduAudioType.value)) yunwuViduAudioType.value = "all";
+    if (!yunwuViduWatermarkPositionOptions.includes(Number(yunwuViduWatermarkPosition.value))) yunwuViduWatermarkPosition.value = 3;
+  }
+  if (isDimleapHappyhorseChannel.value) {
+    videoImageUrls.value = videoImageUrls.value.map((url: string) => /^https?:\/\//i.test(url.trim()) ? url : "");
+    selectedVideoHistoryImageKeys.value = selectedVideoHistoryImageKeys.value.map((key: string, index: number) => index < videoImageLimit.value ? key : "");
+    if (isDimleapHappyhorseR2vModel.value && !grokAspectRatioOptions.includes(grokAspectRatio.value)) grokAspectRatio.value = "16:9";
+    if (!dimleapHappyhorseDurationOptions.includes(Number(grokDuration.value))) grokDuration.value = 3;
+    if (!dimleapHappyhorseResolutionOptions.includes(grokResolution.value)) grokResolution.value = "720P";
+    if (!Number.isInteger(Number(dimleapHappyhorseSeed.value)) || Number(dimleapHappyhorseSeed.value) < 0) dimleapHappyhorseSeed.value = 12345;
+  }
   videoImageUrls.value = videoImageUrls.value.map((url: string, index: number) => index < videoImageLimit.value ? url : "");
   selectedVideoHistoryImageKeys.value = selectedVideoHistoryImageKeys.value.map((key: string, index: number) => index < videoImageLimit.value ? key : "");
 });
@@ -1273,7 +2095,23 @@ watch(grokReferenceMode, () => {
 });
 
 watch(model, () => {
+  if (isDialogueMode.value) {
+    if (!activeModelOptions.value.includes(model.value)) {
+      model.value = defaultDialogueModelForProvider(dialogueProvider.value);
+    }
+    return;
+  }
   if (!isVideoMode.value) return;
+  if (isDimleapHappyhorseChannel.value) {
+    if (isDimleapHappyhorseR2vModel.value && Number(grokDuration.value) === 3) grokDuration.value = 5;
+    if (isDimleapHappyhorseI2vModel.value && Number(grokDuration.value) === 5) grokDuration.value = 3;
+  }
+  if (isLingyaSoraChannel.value) {
+    grokDuration.value = 15;
+  }
+  if (isYunwuViduChannel.value && !currentYunwuViduDurationOptions.value.includes(Number(yunwuViduDuration.value))) {
+    yunwuViduDuration.value = currentYunwuViduDurationOptions.value.at(-1) || 5;
+  }
   if (!videoAllowsImages.value) {
     videoImageUrls.value = ["", "", ""];
     selectedVideoHistoryImageKeys.value = ["", "", ""];
@@ -1289,6 +2127,30 @@ watch(executionMode, (value: ExecutionMode) => {
 
 watch(apiKey, persistApiKey);
 watch(imageEntry, persistImageEntry);
+watch([
+  mode,
+  model,
+  imageEntry,
+  customImageMode,
+  executionMode,
+  selectedHistoryImageKey,
+  generationImageUrls,
+  selectedGenerationHistoryImageKeys,
+  imageUrl,
+  videoChannel,
+  grokReferenceMode,
+  grokInputReference,
+  selectedGrokHistoryImageKey,
+  videoImageUrls,
+  selectedVideoHistoryImageKeys,
+  dialogueProvider,
+  dialogueInput,
+  dialogueBaseUrl,
+  dialogueMessages,
+  dialogueProviderStates,
+  dialogueSidebarCollapsed,
+  historyDrawerOpen,
+], persistChatUiState, { deep: true });
 watch(customImageBaseUrl, persistCustomImageProvider);
 watch(customImageMode, (value: CustomImageMode) => {
   mode.value = "generation";
@@ -1317,12 +2179,22 @@ useHead({
 });
 
 function resetForm() {
-  mode.value = "generation";
-  imageEntry.value = "official";
-  customImageMode.value = "text-to-image";
-  executionMode.value = "sync";
-  baseUrl.value = DEFAULT_API_BASE_URL;
-  model.value = OFFICIAL_IMAGE_DEFAULT_MODEL;
+  if (isDialogueMode.value) {
+    dialogueInput.value = "";
+    dialogueMessages.value = [];
+    dialogueProviderStates.value = {
+      ...currentDialogueProviderStates(),
+      [dialogueProvider.value]: {
+        input: "",
+        messages: [],
+        model: safeDialogueModelForProvider(dialogueProvider.value, model.value),
+        base: safeDialogueBaseForProvider(dialogueProvider.value, dialogueBaseUrl.value),
+      },
+    };
+    responseJson.value = null;
+    errorMessage.value = "";
+    return;
+  }
   prompt.value = "";
   imageUrl.value = "";
   imageDataUrl.value = "";
@@ -1330,7 +2202,6 @@ function resetForm() {
   selectedHistoryImageKey.value = "";
   generationImageUrls.value = [""];
   selectedGenerationHistoryImageKeys.value = [""];
-  videoChannel.value = "veo";
   grokReferenceMode.value = "single";
   grokInputReference.value = "";
   selectedGrokHistoryImageKey.value = "";
@@ -1347,6 +2218,9 @@ function resetForm() {
   zhipuVideoDuration.value = 5;
   zhipuWithAudio.value = true;
   zhipuWatermarkEnabled.value = true;
+  dimleapHappyhorseWatermark.value = false;
+  dimleapHappyhorseSeedEnabled.value = false;
+  dimleapHappyhorseSeed.value = 12345;
   size.value = "1024x1024";
   quality.value = "auto";
   count.value = 1;
@@ -1355,6 +2229,336 @@ function resetForm() {
   previewUrls.value = [];
   videoPreviewUrls.value = [];
   errorMessage.value = "";
+}
+
+function dialogueMessageTime(value: string) {
+  try {
+    return new Date(value).toLocaleTimeString(lang.value === "zh" ? "zh-CN" : "en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return "";
+  }
+}
+
+function dialogueSubmitDisabled() {
+  return !activeModelOptions.value.length || !dialogueInput.value.trim();
+}
+
+function resizeDialogueInput() {
+  if (!import.meta.client) return;
+  nextTick(() => {
+    const el = dialogueInputEl.value;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+  });
+}
+
+function dialogueMessageText(message: DialogueMessage) {
+  const parts = [];
+  if (message.reasoningContent?.trim()) {
+    parts.push(`${lang.value === "zh" ? "思考过程" : "Thinking"}:\n${message.reasoningContent.trim()}`);
+  }
+  if (message.content.trim()) parts.push(message.content.trim());
+  return parts.join("\n\n");
+}
+
+function dialogueReasoningActive(message: DialogueMessage) {
+  return (message.streamStatus === "connected" || message.streamStatus === "receiving") && !message.content.trim();
+}
+
+function dialogueReasoningLabel(message: DialogueMessage) {
+  if (dialogueReasoningActive(message)) return lang.value === "zh" ? "正在思考" : "Thinking";
+  if (message.stopped) return lang.value === "zh" ? "思考已停止" : "Thinking stopped";
+  return lang.value === "zh" ? "已思考" : "Thought";
+}
+
+function dialogueReasoningToggleLabel(message: DialogueMessage) {
+  if (message.reasoningExpanded) return lang.value === "zh" ? "收起" : "Collapse";
+  return lang.value === "zh" ? "查看思考过程" : "View thinking";
+}
+
+function setDialogueReasoningEl(id: string, el: Element | null) {
+  dialogueReasoningEls.value[id] = el instanceof HTMLElement ? el : null;
+}
+
+function scrollDialogueToBottom(force = false) {
+  if (!import.meta.client) return;
+  nextTick(() => {
+    const el = dialogueMessagesEl.value;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (force || distance < 180) el.scrollTop = el.scrollHeight;
+  });
+}
+
+function scrollDialogueReasoningToBottom(id: string) {
+  if (!import.meta.client) return;
+  nextTick(() => {
+    const el = dialogueReasoningEls.value[id];
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+function stopDialogue() {
+  if (!activeDialogueController) return;
+  activeDialogueController.abort();
+  const id = activeDialogueAssistantId.value;
+  if (id) patchDialogueMessage(id, { streamStatus: "done", stopped: true });
+}
+
+async function copyDialogueMessage(message: DialogueMessage) {
+  const text = dialogueMessageText(message);
+  if (!text) return;
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    copiedDialogueMessageId.value = message.id;
+    if (dialogueCopyTimer) clearTimeout(dialogueCopyTimer);
+    dialogueCopyTimer = setTimeout(() => {
+      if (copiedDialogueMessageId.value === message.id) copiedDialogueMessageId.value = "";
+    }, 1400);
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function regenerateDialogue(message: DialogueMessage) {
+  if (loading.value || !activeModelOptions.value.length) return;
+  const assistantIndex = dialogueMessages.value.findIndex((item) => item.id === message.id);
+  if (assistantIndex < 0) return;
+  const userIndex = [...dialogueMessages.value.slice(0, assistantIndex)].map((item) => item.role).lastIndexOf("user");
+  if (userIndex < 0) return;
+  const userMessage = dialogueMessages.value[userIndex];
+  const history = dialogueMessages.value.slice(0, userIndex);
+  dialogueMessages.value = history;
+  await submitDialogue({ content: userMessage.content, appendUser: true });
+}
+
+async function submitDialogue(options: { content?: string; appendUser?: boolean } = {}) {
+  if (loading.value) return;
+  errorMessage.value = "";
+  responseJson.value = null;
+  const content = (options.content ?? dialogueInput.value).trim();
+  if (!content) {
+    errorMessage.value = lang.value === "zh" ? "消息不能为空。" : "Message is required.";
+    return;
+  }
+  if (!activeModelOptions.value.includes(model.value)) {
+    errorMessage.value = dialogueProvider.value === "zhipu"
+      ? (lang.value === "zh" ? "智谱对话仅支持 glm-4.7、glm-4.6v、glm-4.5-air。" : "Zhipu chat only supports glm-4.7, glm-4.6v, and glm-4.5-air.")
+      : (lang.value === "zh" ? "ChatGPT 对话模型无效。" : "Invalid ChatGPT chat model.");
+    return;
+  }
+  if (!effectiveApiKey.value.trim()) {
+    errorMessage.value = lang.value === "zh" ? "API Key 不能为空。" : "API Key is required.";
+    return;
+  }
+  const userMessage: DialogueMessage = {
+    id: newHistoryId(),
+    role: "user",
+    content,
+    createdAt: new Date().toISOString(),
+    model: model.value,
+  };
+  const messages = [...dialogueMessages.value, userMessage].slice(-30);
+  const assistantId = newHistoryId();
+  const assistantMessage: DialogueMessage = {
+    id: assistantId,
+    role: "assistant",
+    content: "",
+    reasoningContent: "",
+    createdAt: new Date().toISOString(),
+    model: model.value,
+    streamStatus: "connected",
+    streamChunkCount: 0,
+  };
+  dialogueMessages.value = [...messages, assistantMessage];
+  if (!options.content) dialogueInput.value = "";
+  resizeDialogueInput();
+  loading.value = true;
+  activeDialogueAssistantId.value = assistantId;
+  const controller = new AbortController();
+  activeDialogueController = controller;
+  scrollDialogueToBottom(true);
+  try {
+    const response = await fetch("/api/chat/dialogue-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        providerName: dialogueProvider.value,
+        provider: {
+          base: effectiveBaseUrl.value,
+          key: effectiveApiKey.value,
+          model: model.value,
+        },
+        messages: messages.map((item) => ({
+          role: item.role,
+          content: item.content,
+        })),
+      }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      responseJson.value = data;
+      errorMessage.value = data?.error?.message || data?.message || (lang.value === "zh" ? "对话请求失败。" : "Chat request failed.");
+      patchDialogueMessage(assistantId, { streamStatus: "failed", content: errorMessage.value });
+      return;
+    }
+    await readDialogueStream(response, assistantId);
+    const finalMessage = dialogueMessages.value.find((item) => item.id === assistantId);
+    if (!finalMessage?.content?.trim() && !finalMessage?.reasoningContent?.trim()) {
+      errorMessage.value = lang.value === "zh" ? "接口未返回助手消息。" : "The API did not return an assistant message.";
+      patchDialogueMessage(assistantId, { streamStatus: "failed", content: errorMessage.value });
+      return;
+    }
+    patchDialogueMessage(assistantId, { streamStatus: "done" });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      const finalMessage = dialogueMessages.value.find((item) => item.id === assistantId);
+      patchDialogueMessage(assistantId, {
+        streamStatus: finalMessage?.content?.trim() || finalMessage?.reasoningContent?.trim() ? "done" : "failed",
+        content: finalMessage?.content?.trim() || finalMessage?.reasoningContent?.trim() ? finalMessage.content : copy.value.stopped,
+        stopped: true,
+      });
+      return;
+    }
+    errorMessage.value = error instanceof Error ? error.message : String(error);
+    responseJson.value = { ok: false, error: { message: errorMessage.value } };
+    patchDialogueMessage(assistantId, { streamStatus: "failed", content: errorMessage.value });
+  } finally {
+    loading.value = false;
+    activeDialogueController = null;
+    activeDialogueAssistantId.value = "";
+    scrollDialogueToBottom();
+  }
+}
+
+function patchDialogueMessage(id: string, patch: Partial<DialogueMessage>) {
+  dialogueMessages.value = dialogueMessages.value.map((item) => item.id === id ? { ...item, ...patch } : item).slice(-50);
+  if (patch.reasoningExpanded && dialogueMessages.value.find((item) => item.id === id)?.reasoningContent) {
+    scrollDialogueReasoningToBottom(id);
+  }
+}
+
+function appendDialogueDelta(id: string, delta: { content?: string; reasoningContent?: string; model?: string }) {
+  dialogueMessages.value = dialogueMessages.value.map((item) => {
+    if (item.id !== id) return item;
+    const nextReasoning = (item.reasoningContent || "") + (delta.reasoningContent || "");
+    const nextContent = (item.content || "") + (delta.content || "");
+    const contentStarted = !item.content.trim() && Boolean((delta.content || "").trim()) && Boolean(nextContent.trim());
+    const reasoningStarted = !item.reasoningContent?.trim() && Boolean((delta.reasoningContent || "").trim());
+    return {
+      ...item,
+      content: nextContent,
+      reasoningContent: nextReasoning,
+      model: delta.model || item.model,
+      streamStatus: "receiving",
+      streamChunkCount: (item.streamChunkCount || 0) + ((delta.content || delta.reasoningContent) ? 1 : 0),
+      reasoningExpanded: nextReasoning
+        ? contentStarted
+          ? false
+          : nextContent
+            ? item.reasoningExpanded ?? false
+            : reasoningStarted
+              ? true
+              : item.reasoningExpanded ?? true
+        : item.reasoningExpanded,
+    };
+  }).slice(-50);
+  for (const key of Object.keys(dialogueReasoningEls.value)) {
+    if (!dialogueMessages.value.some((item) => item.id === key)) {
+      delete dialogueReasoningEls.value[key];
+    }
+  }
+  if (delta.reasoningContent) scrollDialogueReasoningToBottom(id);
+  scrollDialogueToBottom();
+}
+
+async function readDialogueStream(response: Response, assistantId: string) {
+  if (!response.body?.getReader) throw new Error(lang.value === "zh" ? "当前浏览器不支持流式响应。" : "This browser does not support streaming responses.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const finalData: Record<string, unknown> = {};
+
+  function nextSseSeparator(value: string) {
+    const lf = value.indexOf("\n\n");
+    const crlf = value.indexOf("\r\n\r\n");
+    if (lf < 0 && crlf < 0) return null;
+    if (lf < 0) return { index: crlf, length: 4 };
+    if (crlf < 0) return { index: lf, length: 2 };
+    return lf < crlf ? { index: lf, length: 2 } : { index: crlf, length: 4 };
+  }
+
+  async function consumePayload(payload: string) {
+    if (!payload) return false;
+    if (payload === "[DONE]") return true;
+    let data: any = null;
+    try {
+      data = JSON.parse(payload);
+    } catch {
+      return false;
+    }
+    if (data?.ok === false || data?.error) {
+      throw new Error(data?.error?.message || data?.message || (lang.value === "zh" ? "流式对话失败。" : "Streaming chat failed."));
+    }
+    if (data?.type === "delta") {
+      appendDialogueDelta(assistantId, {
+        content: String(data.content || ""),
+        reasoningContent: String(data.reasoningContent || ""),
+        model: typeof data.model === "string" ? data.model : undefined,
+      });
+    } else if (data?.type === "final") {
+      Object.assign(finalData, data);
+      responseJson.value = { ok: true, ...finalData };
+    }
+    return false;
+  }
+
+  outer: for (;;) {
+    const read = await reader.read();
+    if (read.done) break;
+    buffer += decoder.decode(read.value, { stream: true });
+    for (;;) {
+      const separator = nextSseSeparator(buffer);
+      if (!separator) break;
+      const frame = buffer.slice(0, separator.index);
+      buffer = buffer.slice(separator.index + separator.length);
+      const payloadLines = frame
+        .split("\n")
+        .map((line) => line.replace(/\r$/, ""))
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+      if (!payloadLines.length) continue;
+      const done = await consumePayload(payloadLines.join("\n"));
+      if (done) break outer;
+    }
+  }
+  const rest = buffer.trim();
+  if (rest) {
+    const payloadLines = rest
+      .split("\n")
+      .map((line) => line.replace(/\r$/, ""))
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+    if (payloadLines.length) await consumePayload(payloadLines.join("\n"));
+  }
 }
 
 function handleFile(event: Event) {
@@ -1438,12 +2642,13 @@ function makeAsyncRecord(data: any, taskId: string): ChatHistoryRecord {
     images: [],
     videos: [],
     response: data,
+    config: currentHistoryConfig(),
   };
 }
 
 function updateAsyncRecord(record: ChatHistoryRecord, data: any): ChatHistoryRecord {
   const status = normalizeRecordStatus(data?.status, record.taskId);
-  const images = Array.isArray(data?.images) ? data.images.map((url: unknown) => String(url || "").trim()).filter(Boolean) : record.images;
+  const images = Array.isArray(data?.images) ? historyImageUrlsFromCandidates([...data.images, data]) : record.images;
   const videos = Array.isArray(data?.videos) ? data.videos.map((url: unknown) => String(url || "").trim()).filter(Boolean) : record.videos;
   return {
     ...record,
@@ -1452,10 +2657,11 @@ function updateAsyncRecord(record: ChatHistoryRecord, data: any): ChatHistoryRec
     progress: String(data?.progress || record.progress || ""),
     failReason: String(data?.failReason || record.failReason || ""),
     upstreamUrl: String(data?.upstreamUrl || record.upstreamUrl || ""),
-    coverUrl: images[0] || record.coverUrl,
+    coverUrl: preferStoredImageUrls([record.coverUrl, ...images])[0] || "",
     images,
     videos,
     response: data,
+    config: record.config || {},
   };
 }
 
@@ -1509,6 +2715,54 @@ function validateVideoInputs() {
     if (!zhipuVideoDurationOptions.includes(Number(zhipuVideoDuration.value))) return lang.value === "zh" ? "请选择智谱支持的视频时长。" : "Choose a supported Zhipu duration.";
     if (zhipuVideoQuality.value !== "speed" && zhipuVideoQuality.value !== "quality") return lang.value === "zh" ? "请选择智谱输出模式。" : "Choose a Zhipu output mode.";
     if (videoImages.value.length > videoImageLimit.value) return lang.value === "zh" ? "智谱最多支持 2 张参考图。" : "Zhipu supports up to 2 reference images.";
+    return "";
+  }
+  if (isLingyaSoraChannel.value) {
+    if (!lingyaSoraModelOptions.includes(model.value)) return lang.value === "zh" ? "灵芽 Sora 仅支持 sora-2-all-vip-15s。" : "Lingya Sora only supports sora-2-all-vip-15s.";
+    if (!prompt.value.trim()) return lang.value === "zh" ? "提示词不能为空。" : "Prompt is required.";
+    if (!["16:9", "9:16"].includes(grokAspectRatio.value)) return lang.value === "zh" ? "灵芽 Sora 方向仅支持 16:9 或 9:16。" : "Lingya Sora orientation supports 16:9 or 9:16.";
+    if (!lingyaSoraSizeOptions.includes(grokResolution.value)) return lang.value === "zh" ? "灵芽 Sora 尺寸只能为 small 或 large。" : "Lingya Sora size must be small or large.";
+    if (Number(grokDuration.value) !== 15) return lang.value === "zh" ? "sora-2-all-vip-15s 视频时长必须为 15 秒。" : "sora-2-all-vip-15s duration must be 15 seconds.";
+    if (videoImageUrls.value.some((url: string) => url.trim() && !/^https?:\/\//i.test(url.trim()))) return lang.value === "zh" ? "灵芽 Sora unified 仅支持图片 URL，不支持本地 base64 图片。" : "Lingya Sora unified only supports image URLs, not local base64 images.";
+    if (videoImages.value.length > videoImageLimit.value) return lang.value === "zh" ? "灵芽 Sora 初版最多支持 1 张参考图。" : "Lingya Sora currently supports up to 1 reference image.";
+    return "";
+  }
+  if (isYunwuViduChannel.value) {
+    if (!yunwuViduModelOptions.includes(model.value)) return lang.value === "zh" ? "云雾 Vidu 仅支持 viduq3-turbo 和 viduq2-turbo。" : "Yunwu Vidu only supports viduq3-turbo and viduq2-turbo.";
+    if (!prompt.value.trim()) return lang.value === "zh" ? "提示词不能为空。" : "Prompt is required.";
+    if (!videoImages.value.length) return lang.value === "zh" ? "云雾 Vidu 至少需要 1 张图片 URL 或上传图片。" : "Yunwu Vidu requires at least one image URL or uploaded image.";
+    if (videoImages.value.length > 2) return lang.value === "zh" ? "云雾 Vidu 最多支持首尾帧 2 张图片。" : "Yunwu Vidu supports at most two first/last frame images.";
+    if (videoImageUrls.value.some((url: string) => url.trim() && !(/^https?:\/\//i.test(url.trim()) || /^data:image\//i.test(url.trim())))) return lang.value === "zh" ? "云雾 Vidu 只支持图片 URL 或本地上传图片。" : "Yunwu Vidu only supports image URLs or uploaded images.";
+    if (!currentYunwuViduDurationOptions.value.includes(Number(yunwuViduDuration.value))) return model.value === "viduq2-turbo"
+      ? (lang.value === "zh" ? "viduq2-turbo 时长必须为 1-10 秒。" : "viduq2-turbo duration must be 1-10 seconds.")
+      : (lang.value === "zh" ? "viduq3-turbo 时长必须为 1-16 秒。" : "viduq3-turbo duration must be 1-16 seconds.");
+    if (!yunwuViduResolutionOptions.includes(yunwuViduResolution.value)) return lang.value === "zh" ? "云雾 Vidu 清晰度只能为 540p、720p 或 1080p。" : "Yunwu Vidu resolution must be 540p, 720p, or 1080p.";
+    if (!yunwuViduMovementAmplitudeOptions.includes(yunwuViduMovementAmplitude.value)) return lang.value === "zh" ? "云雾 Vidu 运动幅度无效。" : "Yunwu Vidu movement amplitude is invalid.";
+    if (!yunwuViduAudioTypeOptions.includes(yunwuViduAudioType.value)) return lang.value === "zh" ? "云雾 Vidu 音频类型无效。" : "Yunwu Vidu audio type is invalid.";
+    if (!Number.isInteger(Number(yunwuViduSeed.value)) || Number(yunwuViduSeed.value) < 0) return lang.value === "zh" ? "云雾 Vidu seed 必须是非负整数，0 表示随机。" : "Yunwu Vidu seed must be a non-negative integer; 0 means random.";
+    if (!yunwuViduWatermarkPositionOptions.includes(Number(yunwuViduWatermarkPosition.value))) return lang.value === "zh" ? "云雾 Vidu 水印位置只能为 1-4。" : "Yunwu Vidu watermark position must be 1-4.";
+    if (yunwuViduWatermarkUrl.value.trim() && !/^https?:\/\//i.test(yunwuViduWatermarkUrl.value.trim())) return lang.value === "zh" ? "云雾 Vidu wm_url 必须是 http(s) URL。" : "Yunwu Vidu wm_url must be an http(s) URL.";
+    if (yunwuViduMetaData.value.trim()) {
+      try {
+        JSON.parse(yunwuViduMetaData.value.trim());
+      } catch {
+        return lang.value === "zh" ? "云雾 Vidu meta_data 必须是 JSON 字符串。" : "Yunwu Vidu meta_data must be a JSON string.";
+      }
+    }
+    if (yunwuViduPayload.value.length > 1048576) return lang.value === "zh" ? "云雾 Vidu payload 不能超过 1048576 个字符。" : "Yunwu Vidu payload cannot exceed 1,048,576 characters.";
+    if (yunwuViduCallbackUrl.value.trim() && !/^https?:\/\//i.test(yunwuViduCallbackUrl.value.trim())) return lang.value === "zh" ? "云雾 Vidu callback_url 必须是 http(s) URL。" : "Yunwu Vidu callback_url must be an http(s) URL.";
+    return "";
+  }
+  if (isDimleapHappyhorseChannel.value) {
+    if (!dimleapHappyhorseModelOptions.includes(model.value)) return lang.value === "zh" ? "Dimleap Happyhorse 仅支持 happyhorse-1.0-i2v 和 happyhorse-1.0-r2v。" : "Dimleap Happyhorse only supports happyhorse-1.0-i2v and happyhorse-1.0-r2v.";
+    if (!prompt.value.trim()) return lang.value === "zh" ? "提示词不能为空。" : "Prompt is required.";
+    if (isDimleapHappyhorseI2vModel.value && videoImages.value.length !== 1) return lang.value === "zh" ? "Dimleap Happyhorse i2v 必须填写 1 张首帧图片 URL。" : "Dimleap Happyhorse i2v requires one first-frame image URL.";
+    if (isDimleapHappyhorseR2vModel.value && (videoImages.value.length < 1 || videoImages.value.length > 9)) return lang.value === "zh" ? "Dimleap Happyhorse r2v 需要 1-9 张参考图片 URL。" : "Dimleap Happyhorse r2v requires 1-9 reference image URLs.";
+    if (videoImageUrls.value.some((url: string) => url.trim() && !/^https?:\/\//i.test(url.trim()))) return lang.value === "zh" ? "Dimleap Happyhorse 只支持公网图片 URL，不支持本地 base64。" : "Dimleap Happyhorse only supports public image URLs, not local base64.";
+    if (!dimleapHappyhorseDurationOptions.includes(Number(grokDuration.value))) return lang.value === "zh" ? "Dimleap Happyhorse 时长必须为 3-15 秒。" : "Dimleap Happyhorse duration must be 3-15 seconds.";
+    if (isDimleapHappyhorseR2vModel.value && !grokAspectRatioOptions.includes(grokAspectRatio.value)) return lang.value === "zh" ? "Dimleap Happyhorse r2v 比例无效。" : "Dimleap Happyhorse r2v size is invalid.";
+    if (!dimleapHappyhorseResolutionOptions.includes(grokResolution.value)) return lang.value === "zh" ? "Dimleap Happyhorse 分辨率只能为 720P 或 1080P。" : "Dimleap Happyhorse resolution must be 720P or 1080P.";
+    if (dimleapHappyhorseSeedEnabled.value && (!Number.isInteger(Number(dimleapHappyhorseSeed.value)) || Number(dimleapHappyhorseSeed.value) < 0)) return lang.value === "zh" ? "Dimleap Happyhorse seed 必须是非负整数。" : "Dimleap Happyhorse seed must be a non-negative integer.";
     return "";
   }
   if (isYunwuVideoChannel.value) {
@@ -1598,6 +2852,36 @@ async function submitVideo() {
     payload.with_audio = zhipuWithAudio.value;
     payload.watermark_enabled = zhipuWatermarkEnabled.value;
     if (requestImages.length) payload.images = requestImages;
+  } else if (isLingyaSoraChannel.value) {
+    payload.orientation = grokAspectRatio.value === "9:16" ? "portrait" : "landscape";
+    payload.size = grokResolution.value;
+    payload.duration = grokDuration.value;
+    payload.images = requestImages;
+  } else if (isYunwuViduChannel.value) {
+    payload.images = requestImages;
+    payload.duration = yunwuViduDuration.value;
+    payload.resolution = yunwuViduResolution.value;
+    payload.movement_amplitude = yunwuViduMovementAmplitude.value;
+    payload.seed = yunwuViduSeed.value;
+    payload.audio = yunwuViduAudio.value;
+    payload.audio_type = yunwuViduAudioType.value;
+    if (yunwuViduVoiceId.value.trim()) payload.voice_id = yunwuViduVoiceId.value.trim();
+    payload.is_rec = yunwuViduIsRec.value;
+    payload.bgm = yunwuViduBgm.value;
+    payload.off_peak = yunwuViduOffPeak.value;
+    payload.watermark = yunwuViduWatermark.value;
+    payload.wm_position = yunwuViduWatermarkPosition.value;
+    if (yunwuViduWatermarkUrl.value.trim()) payload.wm_url = yunwuViduWatermarkUrl.value.trim();
+    if (yunwuViduMetaData.value.trim()) payload.meta_data = yunwuViduMetaData.value.trim();
+    if (yunwuViduPayload.value.trim()) payload.payload = yunwuViduPayload.value.trim();
+    if (yunwuViduCallbackUrl.value.trim()) payload.callback_url = yunwuViduCallbackUrl.value.trim();
+  } else if (isDimleapHappyhorseChannel.value) {
+    payload.images = requestImages;
+    if (isDimleapHappyhorseR2vModel.value) payload.size = grokAspectRatio.value;
+    payload.duration = grokDuration.value;
+    payload.resolution = grokResolution.value;
+    payload.watermark = dimleapHappyhorseWatermark.value;
+    if (dimleapHappyhorseSeedEnabled.value) payload.seed = dimleapHappyhorseSeed.value;
   } else if (isVeoUnifiedFormatChannel.value) {
     payload.aspect_ratio = grokAspectRatio.value;
     payload.enhance_prompt = veoEnhancePrompt.value;
@@ -1744,6 +3028,10 @@ async function submit() {
   responseJson.value = null;
   previewUrls.value = [];
   videoPreviewUrls.value = [];
+  if (isDialogueMode.value) {
+    await submitDialogue();
+    return;
+  }
   if (!prompt.value.trim()) {
     errorMessage.value = lang.value === "zh" ? "提示词不能为空。" : "Prompt is required.";
     stopCountdown();
@@ -1812,8 +3100,11 @@ async function submit() {
 </script>
 
 <template>
-  <main class="chat-page compact-sidebar-layout">
-    <section class="chat-shell has-fixed-top-panel">
+  <main class="chat-page compact-sidebar-layout" :class="{ 'dialogue-mode': isDialogueMode }">
+    <section
+      class="chat-shell has-fixed-top-panel"
+      :class="{ 'dialogue-shell-layout': isDialogueMode, 'dialogue-sidebar-collapsed': isDialogueMode && dialogueSidebarCollapsed }"
+    >
       <label class="lang-switch page-lang-switch">
         <select v-model="lang">
           <option value="zh">中文</option>
@@ -1826,12 +3117,22 @@ async function submit() {
           <div class="chat-brand">
             <h1>{{ copy.title }}</h1>
           </div>
+          <button
+            v-if="isDialogueMode"
+            type="button"
+            class="dialogue-sidebar-toggle"
+            :aria-expanded="!dialogueSidebarCollapsed"
+            :title="dialogueSidebarCollapsed ? (lang === 'zh' ? '展开侧栏' : 'Expand sidebar') : (lang === 'zh' ? '收起侧栏' : 'Collapse sidebar')"
+            @click="dialogueSidebarCollapsed = !dialogueSidebarCollapsed"
+          >
+            {{ dialogueSidebarCollapsed ? "›" : "‹" }}
+          </button>
         </header>
 
         <div class="media-tabs" aria-label="媒体类型">
           <button
             type="button"
-            :class="{ active: !isVideoMode }"
+            :class="{ active: isImageMode }"
             @click="selectImageMode"
           >
             {{ lang === "zh" ? "图片" : "Image" }}
@@ -1843,9 +3144,16 @@ async function submit() {
           >
             {{ lang === "zh" ? "视频" : "Video" }}
           </button>
+          <button
+            type="button"
+            :class="{ active: isDialogueMode }"
+            @click="selectDialogueMode"
+          >
+            {{ lang === "zh" ? "对话" : "Chat" }}
+          </button>
         </div>
 
-        <div v-if="!isVideoMode" class="mode-tabs compact-tabs" aria-label="图片入口">
+        <div v-if="isImageMode" class="mode-tabs compact-tabs" aria-label="图片入口">
           <button
             v-for="item in imageEntryOptions"
             :key="item.key"
@@ -1858,7 +3166,7 @@ async function submit() {
             <span>{{ item.path }}</span>
           </button>
         </div>
-        <div v-else class="mode-tabs compact-tabs video-tabs" aria-label="视频渠道">
+        <div v-else-if="isVideoMode" class="mode-tabs compact-tabs video-tabs" aria-label="视频渠道">
           <button
             v-for="channel in videoChannelOptions"
             :key="channel.value"
@@ -1869,6 +3177,24 @@ async function submit() {
           >
             <strong>{{ lang === "zh" ? channel.labelZh : channel.labelEn }}</strong>
             <span>{{ channel.endpoint }}</span>
+          </button>
+        </div>
+        <div v-else class="mode-tabs compact-tabs dialogue-tabs" aria-label="对话渠道">
+          <button
+            type="button"
+            :class="{ active: dialogueProvider === 'chatgpt' }"
+            @click="selectDialogueProvider('chatgpt')"
+          >
+            <strong>ChatGPT</strong>
+            <span>/responses</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: dialogueProvider === 'zhipu' }"
+            @click="selectDialogueProvider('zhipu')"
+          >
+            <strong>{{ lang === "zh" ? "智谱" : "Zhipu" }}</strong>
+            <span>/chat/completions</span>
           </button>
         </div>
       </div>
@@ -1884,7 +3210,7 @@ async function submit() {
         <strong>{{ historyRecords.length }}</strong>
       </button>
 
-      <div class="chat-grid" :class="{ 'history-as-drawer': historyDrawerEnabled }">
+      <div class="chat-grid" :class="{ 'history-as-drawer': historyDrawerEnabled, 'dialogue-layout': isDialogueMode }">
         <div
           v-if="historyDrawerEnabled && historyDrawerOpen"
           class="history-drawer-backdrop"
@@ -1931,7 +3257,7 @@ async function submit() {
               @click="restoreHistory(record)"
               @keydown.enter.prevent="restoreHistory(record)"
             >
-              <img v-if="record.coverUrl" :src="record.coverUrl" :alt="promptSummary(record.prompt)" />
+              <img v-if="historyCoverUrl(record)" :src="displayImageUrl(historyCoverUrl(record))" :alt="promptSummary(record.prompt)" />
               <div v-else class="history-placeholder">
                 {{ statusLabel(record) }}
               </div>
@@ -1959,7 +3285,149 @@ async function submit() {
           </div>
         </aside>
 
-        <GptImageGenerator v-if="isCustomImageEntry" embedded />
+        <GptImageGenerator
+          v-if="isCustomImageEntry"
+          embedded
+          :restore-record="selectedRecord?.imageEntry === 'custom' ? selectedRecord : null"
+          @generated="saveGptImageHistory"
+        />
+
+        <form v-else-if="isDialogueMode" class="dialogue-panel" @submit.prevent="submit">
+          <section class="dialogue-shell">
+            <header class="dialogue-toolbar">
+              <div>
+                <strong>{{ dialogueProviderLabel(dialogueProvider) }}</strong>
+                <span v-if="dialogueProvider === 'zhipu'">{{ copy.zhipuChatHint }}</span>
+                <span v-else>{{ copy.chatgptPlaceholder }}</span>
+              </div>
+              <div class="dialogue-config">
+                <select v-model="model" :aria-label="dialogueProvider === 'zhipu' ? '智谱模型' : 'ChatGPT 模型'">
+                  <option v-for="item in activeModelOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+                <input
+                  v-model="dialogueBaseUrl"
+                  type="url"
+                  autocomplete="off"
+                  spellcheck="false"
+                  :placeholder="DIALOGUE_API_BASE_BY_PROVIDER[dialogueProvider]"
+                  :aria-label="dialogueProvider === 'zhipu' ? '智谱 API Base' : 'OpenAI API Base'"
+                />
+                <input
+                  v-model="apiKey"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="sk-..."
+                  :aria-label="dialogueProvider === 'zhipu' ? '智谱 API Key' : 'OpenAI API Key'"
+                />
+                <button type="button" class="secondary" :disabled="loading || !dialogueMessages.length" @click="resetForm">
+                  {{ copy.newChat }}
+                </button>
+              </div>
+            </header>
+
+            <div ref="dialogueMessagesEl" class="dialogue-messages" aria-live="polite">
+              <div v-if="!dialogueMessages.length" class="dialogue-empty">
+                {{ lang === "zh" ? "有什么可以帮忙的？" : "How can I help?" }}
+              </div>
+              <template v-else>
+                <article
+                  v-for="message in dialogueMessages"
+                  :key="message.id"
+                  class="dialogue-message"
+                  :class="message.role"
+                >
+                  <div class="dialogue-avatar">{{ message.role === "user" ? "U" : "AI" }}</div>
+                  <div class="dialogue-bubble">
+                    <div
+                      v-if="message.reasoningContent"
+                      class="dialogue-reasoning"
+                      :class="{ active: dialogueReasoningActive(message), expanded: message.reasoningExpanded }"
+                    >
+                      <button
+                        type="button"
+                        class="dialogue-reasoning-toggle"
+                        :aria-expanded="Boolean(message.reasoningExpanded)"
+                        @click="message.reasoningExpanded = !message.reasoningExpanded"
+                      >
+                        <span class="reasoning-status-dot" aria-hidden="true" />
+                        <strong>{{ dialogueReasoningLabel(message) }}</strong>
+                        <span>{{ dialogueReasoningToggleLabel(message) }}</span>
+                      </button>
+                      <div
+                        v-if="message.reasoningExpanded"
+                        :ref="(el) => setDialogueReasoningEl(message.id, el)"
+                        class="dialogue-reasoning-body"
+                      >
+                        <pre>{{ message.reasoningContent }}</pre>
+                      </div>
+                    </div>
+                    <p v-if="message.content">{{ message.content }}</p>
+                    <p v-else-if="message.streamStatus === 'connected' || message.streamStatus === 'receiving'" class="stream-placeholder">
+                      {{ message.reasoningContent ? (lang === "zh" ? "正在组织回答..." : "Writing answer...") : (lang === "zh" ? "正在思考..." : "Thinking...") }}
+                    </p>
+                    <small>
+                      {{ message.model || dialogueProviderLabel(dialogueProvider) }} ·
+                      {{ message.stopped ? copy.stopped : message.streamStatus === "receiving" ? (lang === "zh" ? "流式输出中" : "Streaming") : dialogueMessageTime(message.createdAt) }}
+                    </small>
+                    <div class="dialogue-actions">
+                      <button
+                        type="button"
+                        :disabled="!dialogueMessageText(message)"
+                        @click="copyDialogueMessage(message)"
+                      >
+                        {{ copiedDialogueMessageId === message.id ? copy.copied : copy.copyMessage }}
+                      </button>
+                      <button
+                        v-if="message.role === 'assistant' && message.streamStatus !== 'connected' && message.streamStatus !== 'receiving'"
+                        type="button"
+                        :disabled="loading"
+                        @click="regenerateDialogue(message)"
+                      >
+                        {{ message.streamStatus === "failed" ? copy.retry : copy.regenerate }}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              </template>
+            </div>
+
+            <div class="dialogue-composer" :class="{ active: dialogueInput.trim(), streaming: loading }">
+              <textarea
+                ref="dialogueInputEl"
+                v-model="dialogueInput"
+                rows="1"
+                :disabled="loading"
+                :placeholder="copy.chatPlaceholder"
+                @input="resizeDialogueInput"
+                @keydown.enter.exact.prevent="submit"
+              />
+              <button
+                v-if="loading"
+                type="button"
+                class="dialogue-send-button stop"
+                :aria-label="copy.stop"
+                :title="copy.stop"
+                @click="stopDialogue"
+              >
+                <span aria-hidden="true">■</span>
+              </button>
+              <button
+                v-else
+                type="submit"
+                class="dialogue-send-button"
+                :disabled="dialogueSubmitDisabled()"
+                :aria-label="copy.send"
+                :title="copy.send"
+              >
+                <span aria-hidden="true">↑</span>
+              </button>
+            </div>
+            <p v-if="errorMessage" class="error-box" role="alert">{{ errorMessage }}</p>
+          </section>
+        </form>
 
         <form v-else class="control-panel" @submit.prevent="submit">
           <section class="card provider-card">
@@ -2105,7 +3573,7 @@ async function submit() {
                     </label>
                   </template>
                 </template>
-                <template v-if="!isYunwuVideoChannel || isYunwuUnifiedVideoChannel || isVeoOpenAIFormatChannel">
+                <template v-if="!isYunwuVideoChannel || isYunwuUnifiedVideoChannel || isVeoOpenAIFormatChannel || isYunwuViduChannel">
                   <label v-for="index in videoImageLimit" :key="index">
                     <span>{{ videoFrameLabel(index - 1) }}</span>
                     <input
@@ -2117,13 +3585,13 @@ async function submit() {
                     />
                   </label>
                 </template>
-                <template v-if="!isYunwuVideoChannel || isVeoOpenAIFormatChannel || (isGrokOpenAIFormatChannel && isGrokMultiReferenceMode)">
+                <template v-if="(!isYunwuVideoChannel && !isDimleapHappyhorseChannel) || isVeoOpenAIFormatChannel || isYunwuViduChannel || (isGrokOpenAIFormatChannel && isGrokMultiReferenceMode)">
                   <label v-for="index in videoImageLimit" :key="`video-file-${index}`">
                     <span>{{ videoFrameLabel(index - 1) }} · {{ copy.upload }}</span>
                     <input type="file" accept="image/*" @change="handleVideoFile(index - 1, $event)" />
                   </label>
                 </template>
-                <template v-if="(!isYunwuVideoChannel || isYunwuUnifiedVideoChannel || isVeoOpenAIFormatChannel) && historyImageOptions.length">
+                <template v-if="(!isYunwuVideoChannel || isYunwuUnifiedVideoChannel || isVeoOpenAIFormatChannel || isYunwuViduChannel) && historyImageOptions.length">
                   <label v-for="index in videoImageLimit" :key="`history-${index}`">
                     <span>{{ videoFrameLabel(index - 1) }} · {{ copy.historyImage }}</span>
                     <select v-model="selectedVideoHistoryImageKeys[index - 1]" @change="selectVideoHistoryImage(index - 1)">
@@ -2134,7 +3602,7 @@ async function submit() {
                     </select>
                   </label>
                 </template>
-                <small>{{ isZhipuCogVideoChannel ? copy.zhipuReferenceHint : isVeoOpenAIFormatChannel ? copy.veoOpenAIReferenceHint : isVeoUnifiedFormatChannel ? copy.veoUnifiedReferenceHint : isGrokUnifiedFormatChannel ? copy.grokUnifiedReferenceHint : isYunwuVideoChannel ? (isGrokSingleReferenceMode ? copy.grokSingleReferenceHint : copy.grokMultiReferenceHint) : copy.videoImageHint }}</small>
+                <small>{{ isZhipuCogVideoChannel ? copy.zhipuReferenceHint : isDimleapHappyhorseChannel ? copy.dimleapHappyhorseReferenceHint : isVeoOpenAIFormatChannel ? copy.veoOpenAIReferenceHint : isVeoUnifiedFormatChannel ? copy.veoUnifiedReferenceHint : isGrokUnifiedFormatChannel ? copy.grokUnifiedReferenceHint : isYunwuVideoChannel ? (isGrokSingleReferenceMode ? copy.grokSingleReferenceHint : copy.grokMultiReferenceHint) : copy.videoImageHint }}</small>
               </template>
               <template v-else>
                 <template v-if="mode === 'generation' && (!isCustomImageEntry || isCustomImageToImage)">
@@ -2237,35 +3705,53 @@ async function submit() {
           <section v-else class="card">
             <h2>{{ lang === "zh" ? "提交视频任务" : "Submit Video Task" }}</h2>
             <small>{{ copy.videoTaskOnly }}</small>
-            <div v-if="isYunwuVideoChannel || isBltVideoChannel || isZhipuCogVideoChannel" class="video-grok-grid">
-              <label>
-                <span>{{ isZhipuCogVideoChannel ? copy.size : copy.grokAspectRatio }}</span>
+            <div v-if="isYunwuVideoChannel || isBltVideoChannel || isZhipuCogVideoChannel || isLingyaSoraChannel || isDimleapHappyhorseChannel" class="video-grok-grid">
+              <label v-if="!isDimleapHappyhorseChannel || isDimleapHappyhorseR2vModel">
+                <span>{{ isZhipuCogVideoChannel ? copy.size : isLingyaSoraChannel ? copy.grokAspectRatio : copy.grokAspectRatio }}</span>
                 <select v-if="isZhipuCogVideoChannel" v-model="zhipuVideoSize">
                   <option v-for="item in zhipuVideoSizeOptions" :key="item" :value="item">
                     {{ item }}
                   </option>
                 </select>
                 <select v-else v-model="grokAspectRatio">
-                  <option v-for="item in isBltVideoChannel ? bltVideoAspectRatioOptions : isVeoUnifiedFormatChannel ? veoUnifiedAspectRatioOptions : isGrokUnifiedFormatChannel ? grokUnifiedAspectRatioOptions : grokAspectRatioOptions" :key="item" :value="item">
+                  <option v-for="item in isBltVideoChannel || isLingyaSoraChannel ? bltVideoAspectRatioOptions : isVeoUnifiedFormatChannel ? veoUnifiedAspectRatioOptions : isGrokUnifiedFormatChannel ? grokUnifiedAspectRatioOptions : grokAspectRatioOptions" :key="item" :value="item">
                     {{ item }}
                   </option>
                 </select>
               </label>
-              <label v-if="isGrokOpenAIFormatChannel || isVeoOpenAIFormatChannel">
+              <label v-if="isGrokOpenAIFormatChannel || isVeoOpenAIFormatChannel || isLingyaSoraChannel || isDimleapHappyhorseChannel">
                 <span>{{ copy.grokDuration }}</span>
                 <select v-model.number="grokDuration">
-                  <option v-for="item in grokDurationOptions" :key="item" :value="item">
+                  <option v-for="item in isDimleapHappyhorseChannel ? dimleapHappyhorseDurationOptions : isLingyaSoraChannel ? [10, 15] : grokDurationOptions" :key="item" :value="item">
                     {{ item }}
                   </option>
                 </select>
               </label>
-              <label v-if="isGrokUnifiedFormatChannel">
+              <label v-if="isGrokUnifiedFormatChannel || isLingyaSoraChannel || isDimleapHappyhorseChannel">
                 <span>{{ copy.grokResolution }}</span>
                 <select v-model="grokResolution">
-                  <option v-for="item in grokUnifiedSizeOptions" :key="item" :value="item">
+                  <option v-for="item in isDimleapHappyhorseChannel ? dimleapHappyhorseResolutionOptions : isLingyaSoraChannel ? lingyaSoraSizeOptions : grokUnifiedSizeOptions" :key="item" :value="item">
                     {{ item }}
                   </option>
                 </select>
+              </label>
+              <label v-if="isDimleapHappyhorseChannel">
+                <span>{{ copy.dimleapHappyhorseWatermark }}</span>
+                <select v-model="dimleapHappyhorseWatermark">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isDimleapHappyhorseChannel">
+                <span>{{ copy.dimleapHappyhorseSeedEnabled }}</span>
+                <select v-model="dimleapHappyhorseSeedEnabled">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isDimleapHappyhorseChannel && dimleapHappyhorseSeedEnabled">
+                <span>{{ copy.dimleapHappyhorseSeed }}</span>
+                <input v-model.number="dimleapHappyhorseSeed" type="number" min="0" step="1" />
               </label>
               <label v-if="isVeoUnifiedFormatChannel || isBltVideoChannel">
                 <span>{{ copy.veoEnhancePrompt }}</span>
@@ -2318,7 +3804,106 @@ async function submit() {
                   <option :value="false">false</option>
                 </select>
               </label>
-              <small>{{ isZhipuCogVideoChannel ? copy.zhipuParamHint : isBltVideoChannel ? copy.bltVideoParamHint : isVeoOpenAIFormatChannel ? copy.veoOpenAIReferenceHint : isVeoUnifiedFormatChannel ? copy.veoUnifiedReferenceHint : isGrokUnifiedFormatChannel ? copy.grokUnifiedReferenceHint : isGrokSingleReferenceMode ? copy.grokSingleReferenceHint : copy.grokMultiReferenceHint }}</small>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.grokDuration }}</span>
+                <select v-model.number="yunwuViduDuration">
+                  <option v-for="item in currentYunwuViduDurationOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.grokResolution }}</span>
+                <select v-model="yunwuViduResolution">
+                  <option v-for="item in yunwuViduResolutionOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduMovement }}</span>
+                <select v-model="yunwuViduMovementAmplitude">
+                  <option v-for="item in yunwuViduMovementAmplitudeOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduSeed }}</span>
+                <input v-model.number="yunwuViduSeed" type="number" min="0" step="1" />
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduAudio }}</span>
+                <select v-model="yunwuViduAudio">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduAudioType }}</span>
+                <select v-model="yunwuViduAudioType">
+                  <option v-for="item in yunwuViduAudioTypeOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduVoiceId }}</span>
+                <input v-model="yunwuViduVoiceId" type="text" placeholder="optional" />
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduIsRec }}</span>
+                <select v-model="yunwuViduIsRec">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduBgm }}</span>
+                <select v-model="yunwuViduBgm">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduOffPeak }}</span>
+                <select v-model="yunwuViduOffPeak">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduWatermark }}</span>
+                <select v-model="yunwuViduWatermark">
+                  <option :value="false">false</option>
+                  <option :value="true">true</option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduWatermarkPosition }}</span>
+                <select v-model.number="yunwuViduWatermarkPosition">
+                  <option v-for="item in yunwuViduWatermarkPositionOptions" :key="item" :value="item">
+                    {{ item }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduWatermarkUrl }}</span>
+                <input v-model="yunwuViduWatermarkUrl" type="url" placeholder="https://..." />
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduMetaData }}</span>
+                <input v-model="yunwuViduMetaData" type="text" placeholder='{"Label":"..."}' />
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.yunwuViduPayload }}</span>
+                <input v-model="yunwuViduPayload" type="text" placeholder="optional" />
+              </label>
+              <label v-if="isYunwuViduChannel">
+                <span>{{ copy.callbackUrl }}</span>
+                <input v-model="yunwuViduCallbackUrl" type="url" placeholder="https://..." />
+              </label>
+              <small>{{ isZhipuCogVideoChannel ? copy.zhipuParamHint : isYunwuViduChannel ? copy.yunwuViduParamHint : isDimleapHappyhorseChannel ? copy.dimleapHappyhorseParamHint : isLingyaSoraChannel ? copy.lingyaSoraParamHint : isBltVideoChannel ? copy.bltVideoParamHint : isVeoOpenAIFormatChannel ? copy.veoOpenAIReferenceHint : isVeoUnifiedFormatChannel ? copy.veoUnifiedReferenceHint : isGrokUnifiedFormatChannel ? copy.grokUnifiedReferenceHint : isGrokSingleReferenceMode ? copy.grokSingleReferenceHint : copy.grokMultiReferenceHint }}</small>
             </div>
             <div class="actions">
               <button type="button" class="secondary" :disabled="loading" @click="resetForm">{{ copy.reset }}</button>
@@ -2330,7 +3915,7 @@ async function submit() {
           </section>
         </form>
 
-        <aside v-if="!isCustomImageEntry" class="preview-panel">
+        <aside v-if="!isCustomImageEntry && !isDialogueMode" class="preview-panel">
           <section class="preview-card task-card">
             <div class="panel-title">
               <h2>{{ copy.taskStatus }}</h2>
@@ -2376,8 +3961,8 @@ async function submit() {
               </a>
             </div>
             <div v-else-if="previewUrls.length" class="image-grid">
-              <a v-for="url in previewUrls" :key="url" :href="url" target="_blank" rel="noreferrer">
-                <img :src="url" alt="Generated image" />
+              <a v-for="url in previewUrls" :key="url" :href="displayImageUrl(url)" target="_blank" rel="noreferrer">
+                <img :src="displayImageUrl(url)" alt="Generated image" />
               </a>
             </div>
             <div v-else class="empty-state">{{ copy.empty }}</div>
@@ -2406,6 +3991,9 @@ async function submit() {
 
 <style scoped>
 .chat-page {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
   height: 100vh;
   height: 100dvh;
   min-height: 100vh;
@@ -2417,6 +4005,16 @@ async function submit() {
   color: #0f172a;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+.chat-page.dialogue-mode {
+  overflow: hidden;
+  background: #ffffff;
+}
+:global(.custom-chat-dialogue-mode .chat-resource-enhancer) {
+  display: none;
+}
+:global(body.custom-chat-dialogue-mode) {
+  margin: 0;
+}
 .chat-page *,
 .chat-page *::before,
 .chat-page *::after {
@@ -2427,6 +4025,26 @@ async function submit() {
   margin-left: 320px;
   margin-right: auto;
   padding: 18px 0 36px;
+}
+.chat-shell.dialogue-shell-layout {
+  width: min(860px, calc(100% - 640px));
+}
+.chat-shell.dialogue-shell-layout {
+  display: grid;
+  grid-template-columns: 288px minmax(0, 1fr);
+  width: 100%;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+.chat-shell.dialogue-shell-layout .page-lang-switch {
+  top: 14px;
+  right: 18px;
+  z-index: 38;
+  width: 108px;
 }
 .chat-grid {
   display: grid;
@@ -2450,6 +4068,67 @@ async function submit() {
   box-shadow: 0 18px 58px rgba(15, 23, 42, 0.08);
   padding: 12px;
   backdrop-filter: blur(18px);
+}
+.chat-shell.dialogue-shell-layout .top-panel {
+  position: sticky;
+  top: 0;
+  left: auto;
+  width: 288px;
+  height: 100dvh;
+  max-height: none;
+  gap: 14px;
+  overflow: auto;
+  border-width: 0 1px 0 0;
+  border-color: rgba(15, 23, 42, 0.08);
+  border-radius: 0;
+  background: #f7f7f8;
+  box-shadow: none;
+  padding: 14px;
+  backdrop-filter: none;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .top-panel {
+  width: 0;
+  min-width: 0;
+  overflow: visible;
+  border-right: 0;
+  padding: 0;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .top-panel > *:not(.chat-header) {
+  display: none;
+}
+.chat-shell.dialogue-shell-layout .chat-header {
+  padding: 4px 4px 0;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .chat-header {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 39;
+  padding: 0;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .chat-brand {
+  display: none;
+}
+.chat-shell.dialogue-shell-layout .chat-header h1 {
+  font-size: 17px;
+  letter-spacing: 0;
+}
+.dialogue-sidebar-toggle {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #18181b;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+.dialogue-sidebar-toggle:hover {
+  background: #f4f4f5;
 }
 .chat-header {
   display: grid;
@@ -2526,7 +4205,7 @@ select:focus {
 }
 .media-tabs {
   display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   width: 100%;
   border: 1px solid rgba(15, 23, 42, 0.08);
@@ -2547,6 +4226,22 @@ select:focus {
   background: #ffffff;
   color: #1d4ed8;
   box-shadow: 0 10px 26px rgba(37, 99, 235, 0.16);
+}
+.chat-shell.dialogue-shell-layout .media-tabs {
+  border-color: rgba(15, 23, 42, 0.08);
+  background: #ececf1;
+  padding: 3px;
+}
+.chat-shell.dialogue-shell-layout .media-tabs button {
+  min-height: 34px;
+  color: #52525b;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.chat-shell.dialogue-shell-layout .media-tabs button.active {
+  background: #ffffff;
+  color: #111827;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 .mode-tabs button,
 .mode-tab-group,
@@ -2572,6 +4267,12 @@ select:focus {
 }
 .video-tabs {
   grid-template-columns: 1fr;
+}
+.dialogue-tabs {
+  grid-template-columns: 1fr;
+}
+.chat-shell.dialogue-shell-layout .dialogue-tabs {
+  gap: 6px;
 }
 .mode-tab-group {
   display: grid;
@@ -2625,6 +4326,30 @@ select:focus {
   background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(255, 255, 255, 0.86));
   box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08);
 }
+.chat-shell.dialogue-shell-layout .mode-tabs button {
+  min-height: 54px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: #52525b;
+  padding: 10px;
+}
+.chat-shell.dialogue-shell-layout .mode-tabs button strong {
+  color: #18181b;
+  font-size: 14px;
+}
+.chat-shell.dialogue-shell-layout .mode-tabs button span {
+  color: #71717a;
+  font-size: 11px;
+}
+.chat-shell.dialogue-shell-layout .mode-tabs button:hover {
+  background: #ececf1;
+}
+.chat-shell.dialogue-shell-layout .mode-tabs button.active {
+  border-color: rgba(15, 23, 42, 0.08);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
 .mode-tabs .mode-subtabs button {
   min-height: 0;
   padding: 8px 10px;
@@ -2644,6 +4369,19 @@ select:focus {
 }
 .chat-grid.history-as-drawer {
   grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1fr);
+}
+.chat-grid.dialogue-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+.chat-shell.dialogue-shell-layout .chat-grid,
+.chat-shell.dialogue-shell-layout .chat-grid.dialogue-layout {
+  position: relative;
+  z-index: 1;
+  display: block;
+  min-height: 100dvh;
+  grid-column: 2;
+  isolation: isolate;
+  background: #ffffff;
 }
 .chat-grid > *,
 .control-panel,
@@ -2708,6 +4446,22 @@ select:focus {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.2);
   font-size: 12px;
+}
+.chat-shell.dialogue-shell-layout .history-drawer-toggle {
+  left: 14px;
+  bottom: 14px;
+  z-index: 36;
+  width: 260px;
+  min-height: 40px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #18181b;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+.chat-shell.dialogue-shell-layout .history-drawer-toggle strong {
+  background: #f4f4f5;
+  color: #52525b;
 }
 .history-title {
   display: flex;
@@ -2909,9 +4663,493 @@ select:focus {
   min-height: 0;
 }
 .control-panel,
-.preview-panel {
+.preview-panel,
+.dialogue-panel {
   display: grid;
   gap: 10px;
+}
+.dialogue-panel {
+  min-height: calc(100dvh - 64px);
+}
+.chat-shell.dialogue-shell-layout .dialogue-panel {
+  min-height: 100dvh;
+}
+.dialogue-shell {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr) auto auto;
+  min-height: calc(100dvh - 70px);
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 22px 70px rgba(15, 23, 42, 0.08);
+}
+.chat-shell.dialogue-shell-layout .dialogue-shell {
+  height: 100dvh;
+  min-height: 100dvh;
+  grid-template-rows: auto minmax(0, 1fr) 0 auto;
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+  box-shadow: none;
+}
+.dialogue-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  padding: 14px 18px;
+}
+.chat-shell.dialogue-shell-layout .dialogue-toolbar {
+  min-height: 64px;
+  border-bottom-color: rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.94);
+  padding: 12px 132px 12px 24px;
+}
+.dialogue-toolbar > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.dialogue-toolbar strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+.chat-shell.dialogue-shell-layout .dialogue-toolbar strong {
+  font-size: 16px;
+}
+.dialogue-toolbar span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-shell.dialogue-shell-layout .dialogue-toolbar span {
+  max-width: 520px;
+  color: #71717a;
+  font-weight: 600;
+}
+.dialogue-config {
+  display: grid;
+  grid-template-columns: minmax(130px, 150px) minmax(210px, 1fr) minmax(160px, 220px) auto;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  width: min(760px, 100%);
+}
+.chat-shell.dialogue-shell-layout .dialogue-config {
+  grid-template-columns: minmax(128px, 154px) minmax(220px, 1fr) minmax(180px, 260px) auto;
+  width: min(820px, 100%);
+}
+.dialogue-config select,
+.dialogue-config input {
+  min-height: 38px;
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.dialogue-config button {
+  min-width: 72px;
+  white-space: nowrap;
+}
+.chat-shell.dialogue-shell-layout .dialogue-config select,
+.chat-shell.dialogue-shell-layout .dialogue-config input {
+  min-height: 38px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.chat-shell.dialogue-shell-layout .dialogue-config button {
+  min-height: 38px;
+  border-radius: 8px;
+  background: #f4f4f5;
+  color: #18181b;
+}
+.dialogue-messages {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  overflow: auto;
+  padding: 28px min(8vw, 88px);
+  scrollbar-color: rgba(15, 23, 42, 0.28) transparent;
+  scrollbar-width: thin;
+}
+.dialogue-messages::-webkit-scrollbar,
+.dialogue-reasoning-body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.dialogue-messages::-webkit-scrollbar-track,
+.dialogue-reasoning-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dialogue-messages::-webkit-scrollbar-thumb,
+.dialogue-reasoning-body::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.28);
+  background-clip: content-box;
+}
+.dialogue-messages::-webkit-scrollbar-thumb:hover,
+.dialogue-reasoning-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.42);
+  background-clip: content-box;
+}
+.chat-shell.dialogue-shell-layout .dialogue-messages {
+  gap: 22px;
+  min-height: 0;
+  overscroll-behavior: contain;
+  background: #ffffff;
+  padding: 34px max(24px, calc((100% - 820px) / 2)) 126px;
+}
+.dialogue-empty {
+  display: grid;
+  min-height: 320px;
+  place-items: center;
+  color: #0f172a;
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  text-align: center;
+}
+.chat-shell.dialogue-shell-layout .dialogue-empty {
+  min-height: calc(100dvh - 260px);
+  color: #18181b;
+  font-size: 30px;
+  font-weight: 750;
+}
+.dialogue-message {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 14px;
+  width: min(760px, 100%);
+}
+.chat-shell.dialogue-shell-layout .dialogue-message {
+  width: min(820px, 100%);
+}
+.dialogue-message.user {
+  justify-self: end;
+  grid-template-columns: minmax(0, 1fr) 34px;
+}
+.dialogue-message.user .dialogue-avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+.dialogue-message.user .dialogue-bubble {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  border-color: rgba(15, 23, 42, 0.08);
+  background: #f4f4f4;
+}
+.chat-shell.dialogue-shell-layout .dialogue-message.user .dialogue-bubble {
+  max-width: min(620px, 100%);
+  border-color: transparent;
+  border-radius: 18px;
+  background: #f4f4f4;
+}
+.dialogue-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 999px;
+  background: #111827;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+}
+.chat-shell.dialogue-shell-layout .dialogue-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #111827;
+  font-size: 10px;
+}
+.dialogue-message.user .dialogue-avatar {
+  background: #10a37f;
+}
+.chat-shell.dialogue-shell-layout .dialogue-message.user .dialogue-avatar {
+  border-radius: 999px;
+  background: #ececf1;
+  color: #18181b;
+}
+.dialogue-bubble {
+  max-width: 100%;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: transparent;
+  color: #0f172a;
+  padding: 9px 12px;
+}
+.chat-shell.dialogue-shell-layout .dialogue-bubble {
+  padding: 3px 0 0;
+}
+.chat-shell.dialogue-shell-layout .dialogue-message.user .dialogue-bubble {
+  padding: 10px 14px;
+}
+.dialogue-bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+.chat-shell.dialogue-shell-layout .dialogue-bubble p {
+  color: #18181b;
+  font-size: 15px;
+  line-height: 1.75;
+}
+.dialogue-bubble .stream-placeholder {
+  color: #64748b;
+}
+.dialogue-reasoning {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.dialogue-reasoning-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 7px;
+  min-height: 30px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #64748b;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.dialogue-reasoning-toggle strong {
+  color: #475569;
+  font-size: 12px;
+}
+.dialogue-reasoning-toggle span:last-child {
+  color: #64748b;
+  font-weight: 800;
+}
+.reasoning-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+.dialogue-reasoning.active .reasoning-status-dot {
+  background: #10a37f;
+  box-shadow: 0 0 0 0 rgba(16, 163, 127, 0.42);
+  animation: reasoning-pulse 1.25s ease-out infinite;
+}
+@keyframes reasoning-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 163, 127, 0.38);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(16, 163, 127, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 163, 127, 0);
+  }
+}
+.dialogue-reasoning-body {
+  max-height: 260px;
+  overflow: auto;
+  scrollbar-color: rgba(15, 23, 42, 0.28) transparent;
+  scrollbar-width: thin;
+  border-left: 3px solid rgba(16, 163, 127, 0.42);
+  border-radius: 0 12px 12px 0;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+.dialogue-reasoning pre {
+  margin: 0;
+  color: #475569;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-shell.dialogue-shell-layout .dialogue-reasoning-toggle {
+  border-color: rgba(15, 23, 42, 0.08);
+  border-radius: 9px;
+  background: #f4f4f5;
+}
+.chat-shell.dialogue-shell-layout .dialogue-reasoning.expanded .dialogue-reasoning-toggle {
+  background: #f7f7f8;
+}
+.chat-shell.dialogue-shell-layout .dialogue-reasoning-body {
+  max-height: 300px;
+  background: #f7f7f8;
+}
+.dialogue-bubble small {
+  display: block;
+  margin-top: 8px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+.dialogue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+.dialogue-message:focus-within .dialogue-actions,
+.dialogue-message:hover .dialogue-actions {
+  opacity: 1;
+}
+.dialogue-actions button {
+  min-height: 26px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.dialogue-actions button:hover:not(:disabled) {
+  border-color: rgba(16, 163, 127, 0.32);
+  background: rgba(16, 163, 127, 0.08);
+  color: #0f766e;
+}
+.chat-shell.dialogue-shell-layout .dialogue-actions button {
+  border-color: transparent;
+  background: transparent;
+  color: #71717a;
+  padding: 4px 6px;
+}
+.chat-shell.dialogue-shell-layout .dialogue-actions button:hover:not(:disabled) {
+  background: #f4f4f5;
+  color: #18181b;
+}
+.dialogue-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  width: min(820px, calc(100% - 32px));
+  margin: 0 auto 16px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 22px;
+  background: #ffffff;
+  padding: 9px;
+  box-shadow: 0 16px 46px rgba(15, 23, 42, 0.08);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+.dialogue-composer:focus-within {
+  border-color: rgba(15, 23, 42, 0.22);
+  box-shadow: 0 18px 54px rgba(15, 23, 42, 0.12);
+}
+.dialogue-composer.active {
+  border-color: rgba(16, 163, 127, 0.28);
+}
+.chat-shell.dialogue-shell-layout .dialogue-composer {
+  position: fixed;
+  right: max(24px, calc((100% - 288px - 820px) / 2));
+  bottom: 18px;
+  z-index: 34;
+  width: min(820px, calc(100% - 288px - 48px));
+  margin: 0;
+  border-color: rgba(15, 23, 42, 0.14);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.12);
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .dialogue-composer {
+  right: max(24px, calc((100% - 820px) / 2));
+  width: min(820px, calc(100% - 48px));
+}
+.dialogue-composer textarea {
+  height: 42px;
+  min-height: 42px;
+  max-height: 180px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  padding: 10px 12px;
+  resize: none;
+  overflow-y: auto;
+  scrollbar-color: rgba(15, 23, 42, 0.28) transparent;
+  scrollbar-width: thin;
+}
+.chat-shell.dialogue-shell-layout .dialogue-composer textarea {
+  height: 48px;
+  min-height: 48px;
+  max-height: 220px;
+  border-radius: 14px;
+  padding: 13px 12px;
+  resize: none;
+}
+.dialogue-composer textarea::-webkit-scrollbar {
+  width: 8px;
+}
+.dialogue-composer textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dialogue-composer textarea::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.28);
+  background-clip: content-box;
+}
+.dialogue-composer textarea:focus {
+  box-shadow: none;
+}
+.dialogue-send-button {
+  display: inline-grid;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  place-items: center;
+  border-radius: 999px;
+  background: #111827;
+  color: #ffffff;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+.dialogue-send-button span {
+  transform: translateY(-1px);
+}
+.dialogue-send-button.stop {
+  background: #ef4444;
+  font-size: 12px;
+}
+.dialogue-send-button:disabled {
+  background: #d4d4d8;
+  color: #ffffff;
+  opacity: 1;
+}
+.chat-shell.dialogue-shell-layout .dialogue-composer button {
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  min-height: 38px;
+  border-radius: 999px;
+  padding: 0;
+}
+.dialogue-shell > .error-box {
+  width: min(820px, calc(100% - 32px));
+  margin: 0 auto 16px;
+}
+.chat-shell.dialogue-shell-layout .dialogue-shell > .error-box {
+  position: fixed;
+  right: max(24px, calc((100% - 288px - 820px) / 2));
+  bottom: 86px;
+  z-index: 34;
+  width: min(820px, calc(100% - 288px - 48px));
+  margin: 0;
+  border-radius: 12px;
+}
+.chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .dialogue-shell > .error-box {
+  right: max(24px, calc((100% - 820px) / 2));
+  width: min(820px, calc(100% - 48px));
 }
 .card,
 .preview-card {
@@ -3260,12 +5498,36 @@ button:disabled {
     margin: 0 auto;
     padding: 18px 0;
   }
+  .chat-shell.dialogue-shell-layout {
+    display: grid;
+    grid-template-columns: 288px minmax(0, 1fr);
+    width: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
+  }
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
   .top-panel {
     position: static;
     width: auto;
     max-height: none;
     overflow: visible;
     margin-bottom: 14px;
+  }
+  .chat-shell.dialogue-shell-layout .top-panel {
+    position: sticky;
+    top: 0;
+    left: auto;
+    width: 288px;
+    height: 100dvh;
+    max-height: none;
+    margin-bottom: 0;
+  }
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .top-panel {
+    width: 0;
+    padding: 0;
   }
   .page-lang-switch {
     top: 14px;
@@ -3281,14 +5543,18 @@ button:disabled {
     grid-template-columns: 1fr;
   }
   .compact-tabs,
-  .video-tabs {
+  .video-tabs,
+  .dialogue-tabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .media-tabs {
-    grid-template-columns: repeat(2, minmax(96px, 1fr));
+    grid-template-columns: repeat(3, minmax(82px, 1fr));
   }
   .history-drawer-toggle {
     width: auto;
+  }
+  .chat-shell.dialogue-shell-layout .history-drawer-toggle {
+    width: 260px;
   }
   .history-panel {
     position: static;
@@ -3332,8 +5598,46 @@ button:disabled {
   }
   .media-tabs,
   .compact-tabs,
-  .video-tabs {
+  .video-tabs,
+  .dialogue-tabs {
     width: 100%;
+    grid-template-columns: 1fr;
+  }
+  .dialogue-panel,
+  .dialogue-shell {
+    min-height: calc(100dvh - 24px);
+  }
+  .dialogue-toolbar,
+  .dialogue-config {
+    grid-template-columns: 1fr;
+  }
+  .dialogue-toolbar {
+    display: grid;
+  }
+  .dialogue-messages {
+    padding: 20px 12px;
+  }
+  .dialogue-message,
+  .dialogue-message.user {
+    grid-template-columns: 30px minmax(0, 1fr);
+    gap: 10px;
+    justify-self: stretch;
+  }
+  .dialogue-message.user .dialogue-avatar {
+    grid-column: 1;
+  }
+  .dialogue-message.user .dialogue-bubble {
+    grid-column: 2;
+    justify-self: stretch;
+  }
+  .dialogue-avatar {
+    width: 30px;
+    height: 30px;
+  }
+  .dialogue-actions {
+    opacity: 1;
+  }
+  .dialogue-composer {
     grid-template-columns: 1fr;
   }
   .provider-card,
@@ -3381,6 +5685,74 @@ button:disabled {
     right: 12px;
     bottom: 12px;
     justify-content: center;
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-page.dialogue-mode {
+    overflow-y: auto;
+  }
+  .chat-shell.dialogue-shell-layout {
+    width: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
+  }
+  .chat-shell.dialogue-shell-layout,
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed {
+    display: block;
+  }
+  .chat-shell.dialogue-shell-layout .page-lang-switch {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+  }
+  .chat-shell.dialogue-shell-layout .top-panel {
+    position: static;
+    width: 100%;
+    max-height: none;
+    border-width: 0 0 1px;
+    padding: 10px;
+  }
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .top-panel {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    border-width: 0 0 1px;
+    padding: 10px;
+  }
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .top-panel > *:not(.chat-header) {
+    display: none;
+  }
+  .chat-shell.dialogue-shell-layout .chat-header {
+    padding-right: 118px;
+  }
+  .chat-shell.dialogue-shell-layout.dialogue-sidebar-collapsed .chat-header {
+    position: static;
+    padding: 0 118px 0 0;
+  }
+  .chat-shell.dialogue-shell-layout .dialogue-toolbar {
+    display: grid;
+    min-height: 0;
+    padding: 12px;
+  }
+  .chat-shell.dialogue-shell-layout .dialogue-config {
+    grid-template-columns: 1fr;
+  }
+  .chat-shell.dialogue-shell-layout .dialogue-messages {
+    padding: 24px 14px 132px;
+  }
+  .chat-shell.dialogue-shell-layout .dialogue-empty {
+    min-height: 260px;
+    font-size: 26px;
+  }
+  .chat-shell.dialogue-shell-layout .dialogue-composer,
+  .chat-shell.dialogue-shell-layout .dialogue-shell > .error-box {
+    right: 10px;
+    width: calc(100% - 20px);
+  }
+  .chat-shell.dialogue-shell-layout .history-drawer-toggle {
+    display: none;
   }
 }
 </style>

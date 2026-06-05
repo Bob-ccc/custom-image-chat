@@ -3,5 +3,5 @@ definePageMeta({ layout: false });
 </script>
 
 <template>
-  <HidreamStudio />
+  <GptImagePlayground />
 </template>
