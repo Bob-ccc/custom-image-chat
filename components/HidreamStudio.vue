@@ -2231,8 +2231,8 @@ input[type="number"]:focus {
   inset: 10px;
   display: block;
   box-sizing: border-box;
-  width: 100%;
-  height: 100%;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
   object-fit: contain;
   object-position: center;
 }
@@ -2326,12 +2326,32 @@ input[type="number"]:focus {
 }
 
 @media (max-width: 768px) {
+  html.hidream-html,
+  body.hidream-body {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  body.hidream-body #__nuxt {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .hidream-page {
+    height: auto;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
+
   .topbar {
     grid-template-columns: 1fr auto;
     grid-template-areas:
       "brand lang"
       "status status";
-    padding: 8px 10px 0;
+    padding: max(8px, env(safe-area-inset-top)) 10px 0;
     gap: 8px;
   }
 
@@ -2339,10 +2359,45 @@ input[type="number"]:focus {
     grid-area: status;
     justify-self: stretch;
     max-width: none;
+    align-items: flex-start;
+    border-radius: 14px;
+    padding: 8px 10px;
+  }
+
+  .status-text {
+    white-space: normal;
+    line-height: 1.35;
+  }
+
+  .brand {
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .brand-mark {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
   }
 
   .brand-title {
-    font-size: 20px;
+    font-size: 19px;
+    letter-spacing: 0;
+  }
+
+  .brand-sub {
+    font-size: 12px;
+  }
+
+  .lang-switch {
+    align-self: start;
+    padding: 3px;
+  }
+
+  .lang-btn {
+    min-height: 36px;
+    padding: 7px 10px;
+    font-size: 12px;
   }
 
   .workspace {
@@ -2351,9 +2406,12 @@ input[type="number"]:focus {
       "controls"
       "canvas"
       "history";
-    padding: 6px 8px 10px;
-    gap: 8px;
+    flex: 0 0 auto;
+    min-height: 0;
+    padding: 6px 8px calc(10px + env(safe-area-inset-bottom));
+    gap: 10px;
     max-width: none;
+    align-items: start;
   }
 
   .controls-actions {
@@ -2365,7 +2423,7 @@ input[type="number"]:focus {
   }
 
   .history-rail {
-    max-height: min(32dvh, 260px);
+    max-height: none;
   }
 
   .history-list {
@@ -2386,6 +2444,7 @@ input[type="number"]:focus {
   .history-item {
     width: min(280px, 78vw);
     grid-template-columns: 56px 1fr;
+    align-items: start;
   }
 
   .history-visual {
@@ -2402,17 +2461,31 @@ input[type="number"]:focus {
     overflow: visible;
   }
 
+  .settings-body {
+    overflow: visible;
+  }
+
   .settings-block {
     flex: 0 0 auto;
   }
 
   .canvas-panel {
-    min-height: min(40dvh, 360px);
+    min-height: clamp(320px, 52dvh, 520px);
     padding: 10px;
+  }
+
+  .preview-stage {
+    min-height: 260px;
   }
 
   .param-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ratio-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
   }
 
   .prompt-textarea {
@@ -2426,8 +2499,32 @@ input[type="number"]:focus {
   }
 
   .ratio-btn {
-    padding: 7px 10px;
+    min-height: 38px;
+    padding: 7px 8px;
     font-size: 11px;
+  }
+
+  .submit-btn,
+  .ghost-btn,
+  .history-download,
+  .history-thumb,
+  .task-chip-main,
+  .task-chip-action {
+    min-height: 44px;
+  }
+
+  .task-strip {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .task-list {
+    width: 100%;
+  }
+
+  .task-chip {
+    max-width: min(260px, 84vw);
   }
 
   .hint-banner.interrupted {
@@ -2446,6 +2543,48 @@ input[type="number"]:focus {
 
   .panel {
     border-radius: 18px;
+  }
+
+  .history-lightbox {
+    padding: calc(54px + env(safe-area-inset-top)) 10px calc(12px + env(safe-area-inset-bottom));
+    align-items: start;
+  }
+
+  .lightbox-close {
+    top: max(10px, env(safe-area-inset-top));
+    right: 10px;
+    min-height: 40px;
+  }
+
+  .lightbox-figure {
+    width: 100%;
+    max-height: calc(100dvh - 72px);
+  }
+
+  .lightbox-figure img {
+    max-height: calc(100dvh - 132px);
+  }
+}
+
+@media (max-width: 380px) {
+  .topbar {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "brand"
+      "lang"
+      "status";
+  }
+
+  .lang-switch {
+    justify-self: start;
+  }
+
+  .ratio-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-panel {
+    min-height: 300px;
   }
 }
 
