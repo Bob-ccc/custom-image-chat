@@ -486,6 +486,7 @@ async function submit() {
 }
 .panel {
   min-width: 0;
+  overflow: hidden;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.78);
@@ -497,6 +498,7 @@ async function submit() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
   gap: 10px;
 }
 h1,
@@ -511,6 +513,7 @@ h2 {
 }
 .panel-title span {
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(37, 99, 235, 0.1);
@@ -518,6 +521,7 @@ h2 {
   padding: 4px 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 900;
 }
@@ -658,8 +662,11 @@ button:disabled {
   object-fit: cover;
 }
 .json-panel pre {
+  width: 100%;
+  max-width: 100%;
   max-height: 240px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   border-radius: 14px;
   background: #0f172a;
   color: #dbeafe;
@@ -668,6 +675,7 @@ button:disabled {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 @media (max-width: 900px) {
   .gpt-image-page {
@@ -676,14 +684,44 @@ button:disabled {
   }
 }
 @media (max-width: 560px) {
+  .gpt-image-page {
+    padding: 8px;
+  }
+
+  .panel {
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  .panel-title {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .panel-title span {
+    white-space: normal;
+  }
+
   .provider-panel,
   .params-panel,
   .source-row {
     grid-template-columns: 1fr;
   }
+
   .actions,
   .source-actions {
     flex-direction: column;
+  }
+
+  button,
+  .upload-button {
+    min-height: 44px;
+  }
+
+  .json-panel pre {
+    max-height: 220px;
+    padding: 10px;
+    font-size: 11px;
   }
 }
 </style>
