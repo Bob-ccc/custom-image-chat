@@ -17,6 +17,7 @@ type HidreamTask = {
   status: HidreamTaskStatus;
   statuses: string[];
   imageUrl: string | null;
+  displayUrl: string | null;
   error: string | null;
   startedAt: number;
   params: HidreamTaskParams;
@@ -27,6 +28,7 @@ type HidreamHistoryRecord = {
   createdAt: string;
   eventId: string;
   imageUrl: string;
+  localImageUrl?: string | null;
   thumbnailUrl?: string | null;
   imageWidth?: number | null;
   imageHeight?: number | null;
@@ -189,6 +191,8 @@ const historyPreview = ref<HidreamHistoryRecord | null>(null);
 const formError = ref("");
 
 const taskStreams = new Map<string, AbortController>();
+const previewImageLoadStarts = new Map<string, number>();
+const previewObjectUrls = new Set<string>();
 let historyDbPromise: Promise<IDBDatabase | null> | null = null;
 
 const t = computed(() => messages[locale.value as Locale]);
@@ -288,8 +292,16 @@ function selectTask(taskId: string) {
   if (task) applyTaskParams(task.params);
 }
 
+function releasePreviewObjectUrl(url?: string | null) {
+  if (!url || !previewObjectUrls.has(url)) return;
+  URL.revokeObjectURL(url);
+  previewObjectUrls.delete(url);
+}
+
 function removeTask(taskId: string) {
   cancelTaskStream(taskId);
+  const task = tasks.value.find((item) => item.id === taskId);
+  releasePreviewObjectUrl(task?.displayUrl);
   tasks.value = tasks.value.filter((task) => task.id !== taskId);
   if (activeTaskId.value === taskId) {
     activeTaskId.value = tasks.value[0]?.id || null;
@@ -304,6 +316,8 @@ function cancelTaskStream(taskId: string) {
 
 function cancelTask(taskId: string) {
   cancelTaskStream(taskId);
+  const task = tasks.value.find((item) => item.id === taskId);
+  releasePreviewObjectUrl(task?.displayUrl);
   updateTask(taskId, { status: "cancelled" });
 }
 
@@ -531,82 +545,113 @@ function formatHistoryMetaLine(record: HidreamHistoryRecord) {
   return parts.join(" · ");
 }
 
-async function probeImageMeta(url: string) {
-  const dimensions = await new Promise<{ width: number; height: number } | null>((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
+function displayImageUrl(url: string) {
+  const value = String(url || "").trim();
+  if (!/^https?:\/\//i.test(value)) return value;
+  return "/api/chat/image-preview?url=" + encodeURIComponent(value);
+}
 
-  let bytes: number | null = null;
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Failed to read image blob."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function canvasToDataUrl(canvas: HTMLCanvasElement, mimeType = "image/webp", quality = 0.92) {
+  const dataUrl = canvas.toDataURL(mimeType, quality);
+  return dataUrl.startsWith("data:image/png") && mimeType !== "image/png"
+    ? canvas.toDataURL("image/png")
+    : dataUrl;
+}
+
+function imageElementToThumbnailUrl(img: HTMLImageElement) {
+  const sourceWidth = img.naturalWidth;
+  const sourceHeight = img.naturalHeight;
+  if (!sourceWidth || !sourceHeight) return null;
+
+  const scale = Math.min(1, HISTORY_THUMBNAIL_MAX_SIZE / Math.max(sourceWidth, sourceHeight));
+  const thumbCanvas = document.createElement("canvas");
+  thumbCanvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  thumbCanvas.height = Math.max(1, Math.round(sourceHeight * scale));
+  const thumbCtx = thumbCanvas.getContext("2d");
+  if (!thumbCtx) return null;
+  thumbCtx.drawImage(img, 0, 0, thumbCanvas.width, thumbCanvas.height);
+
+  return {
+    thumbnailUrl: canvasToDataUrl(thumbCanvas, "image/webp", HISTORY_THUMBNAIL_QUALITY),
+    width: sourceWidth,
+    height: sourceHeight,
+  };
+}
+
+function reportPreviewImageLoad(task: HidreamTask, event: Event) {
+  const startedAt = previewImageLoadStarts.get(task.id);
+  const elapsed = startedAt ? Math.round(performance.now() - startedAt) : null;
+  const img = event.target as HTMLImageElement;
+  let stored: ReturnType<typeof imageElementToThumbnailUrl> = null;
   try {
-    const response = await fetch(url);
-    if (response.ok) {
-      const blob = await response.blob();
-      bytes = blob.size;
-    }
-  } catch {
-    bytes = null;
+    stored = imageElementToThumbnailUrl(img);
+  } catch (error) {
+    console.warn("[HiDream] preview thumbnail could not be created", error);
   }
-
-  if (!dimensions) return null;
-  return { ...dimensions, bytes };
-}
-
-async function createHistoryThumbnail(url: string) {
-  return new Promise<string | null>((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const sourceWidth = img.naturalWidth;
-      const sourceHeight = img.naturalHeight;
-      if (!sourceWidth || !sourceHeight) {
-        resolve(null);
-        return;
-      }
-
-      const scale = Math.min(1, HISTORY_THUMBNAIL_MAX_SIZE / Math.max(sourceWidth, sourceHeight));
-      const width = Math.max(1, Math.round(sourceWidth * scale));
-      const height = Math.max(1, Math.round(sourceHeight * scale));
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        resolve(null);
-        return;
-      }
-
-      ctx.drawImage(img, 0, 0, width, height);
-
-      try {
-        resolve(canvas.toDataURL("image/webp", HISTORY_THUMBNAIL_QUALITY));
-      } catch {
-        resolve(null);
-      }
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
+  const record = historyRecords.value.find((item) => item.eventId === task.eventId);
+  if (record && stored) {
+    updateHistoryRecord(record.id, {
+      thumbnailUrl: stored.thumbnailUrl,
+      imageWidth: stored.width,
+      imageHeight: stored.height,
+    });
+  }
+  console.info("[HiDream] preview image loaded", {
+    elapsedMs: elapsed,
+    naturalWidth: img.naturalWidth,
+    naturalHeight: img.naturalHeight,
+    storedBytes: record?.imageBytes ?? null,
+    url: task.imageUrl,
   });
+  previewImageLoadStarts.delete(task.id);
 }
 
-async function saveHistoryRecord(task: HidreamTask) {
+function reportPreviewImageError(task: HidreamTask) {
+  const startedAt = previewImageLoadStarts.get(task.id);
+  const elapsed = startedAt ? Math.round(performance.now() - startedAt) : null;
+  console.warn("[HiDream] preview image failed", {
+    elapsedMs: elapsed,
+    url: task.imageUrl,
+  });
+  previewImageLoadStarts.delete(task.id);
+}
+
+async function prepareGeneratedImage(imageUrl: string, signal: AbortSignal) {
+  const response = await fetch(displayImageUrl(imageUrl), { signal });
+  if (!response.ok) throw new Error(`Image download failed: HTTP ${response.status}`);
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  previewObjectUrls.add(objectUrl);
+  const localImageUrl = await blobToDataUrl(blob);
+  return {
+    displayUrl: objectUrl,
+    localImageUrl,
+    bytes: blob.size,
+    contentType: blob.type || null,
+  };
+}
+
+async function saveHistoryRecord(task: HidreamTask, localImageUrl?: string | null, imageBytes?: number | null) {
   if (!task.imageUrl) return;
-  const [meta, thumbnailUrl] = await Promise.all([
-    probeImageMeta(task.imageUrl),
-    createHistoryThumbnail(task.imageUrl),
-  ]);
   const record: HidreamHistoryRecord = {
     id: createLocalId(),
     createdAt: new Date().toISOString(),
     eventId: task.eventId,
     imageUrl: task.imageUrl,
-    thumbnailUrl,
-    imageWidth: meta?.width ?? null,
-    imageHeight: meta?.height ?? null,
-    imageBytes: meta?.bytes ?? null,
+    localImageUrl: localImageUrl || null,
+    thumbnailUrl: null,
+    imageWidth: null,
+    imageHeight: null,
+    imageBytes: imageBytes ?? null,
     statuses: [...task.statuses],
     params: { ...task.params },
   };
@@ -619,40 +664,6 @@ async function saveHistoryRecord(task: HidreamTask) {
     historyRecords.value.length,
   );
   void persistHistory();
-}
-
-async function hydrateHistoryThumbnail(record: HidreamHistoryRecord, img: HTMLImageElement) {
-  if (record.thumbnailUrl) return;
-
-  try {
-    const canvas = document.createElement("canvas");
-    const scale = Math.min(1, HISTORY_THUMBNAIL_MAX_SIZE / Math.max(img.naturalWidth, img.naturalHeight));
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    updateHistoryRecord(record.id, {
-      thumbnailUrl: canvas.toDataURL("image/webp", HISTORY_THUMBNAIL_QUALITY),
-    });
-  } catch {
-    const thumbnailUrl = await createHistoryThumbnail(record.imageUrl);
-    if (thumbnailUrl) updateHistoryRecord(record.id, { thumbnailUrl });
-  }
-}
-
-function captureHistoryImageSize(recordId: string, event: Event) {
-  const record = historyRecords.value.find((item) => item.id === recordId);
-  const img = event.target as HTMLImageElement;
-  if (!record || !img.naturalWidth || !img.naturalHeight) return;
-
-  const patch: Partial<HidreamHistoryRecord> = {};
-  if (!record.imageWidth) {
-    patch.imageWidth = img.naturalWidth;
-    patch.imageHeight = img.naturalHeight;
-  }
-  if (Object.keys(patch).length) updateHistoryRecord(recordId, patch);
-  void hydrateHistoryThumbnail(record, img);
 }
 
 function deleteHistoryRecord(recordId: string) {
@@ -676,17 +687,26 @@ function restoreHistoryParams(record: HidreamHistoryRecord) {
 }
 
 function historyDownloadFilename(record: HidreamHistoryRecord) {
-  const extMatch = record.imageUrl.match(/\.(png|jpe?g|webp|gif)(\?|$)/i);
+  const source = record.localImageUrl || record.imageUrl;
+  const extMatch = source.match(/^data:image\/([^;,]+)/i) || source.match(/\.(png|jpe?g|webp|gif)(\?|$)/i);
   const ext = extMatch ? extMatch[1].toLowerCase().replace("jpeg", "jpg") : "png";
   return `hidream-${record.id}.${ext}`;
 }
 
 async function downloadHistoryImage(record: HidreamHistoryRecord) {
-  if (!import.meta.client || !record.imageUrl) return;
+  if (!import.meta.client || (!record.localImageUrl && !record.imageUrl)) return;
 
   const filename = historyDownloadFilename(record);
+  if (record.localImageUrl) {
+    const anchor = document.createElement("a");
+    anchor.href = record.localImageUrl;
+    anchor.download = filename;
+    anchor.click();
+    return;
+  }
+
   try {
-    const response = await fetch(record.imageUrl);
+    const response = await fetch(displayImageUrl(record.imageUrl));
     if (!response.ok) throw new Error("fetch failed");
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
@@ -747,6 +767,7 @@ async function generateImage() {
     status: "running",
     statuses: [],
     imageUrl: null,
+    displayUrl: null,
     error: null,
     startedAt: Date.now(),
     params,
@@ -794,9 +815,11 @@ async function executeTask(taskId: string) {
 
     updateTask(taskId, { eventId: submitData.event_id });
     const imageUrl = await readGenerationStream(taskId, submitData.event_id, controller.signal);
-    updateTask(taskId, { status: "completed", imageUrl, error: null });
+    const preparedImage = await prepareGeneratedImage(imageUrl, controller.signal);
+    previewImageLoadStarts.set(taskId, performance.now());
+    updateTask(taskId, { status: "completed", imageUrl, displayUrl: preparedImage.displayUrl, error: null });
     const completed = tasks.value.find((item) => item.id === taskId);
-    if (completed) void saveHistoryRecord(completed);
+    if (completed) void saveHistoryRecord(completed, preparedImage.localImageUrl, preparedImage.bytes);
     if (activeTaskId.value === taskId) persistInterruptedSnapshot();
   } catch (error) {
     if (isAbortError(error)) {
@@ -983,6 +1006,9 @@ onBeforeUnmount(() => {
   for (const taskId of [...taskStreams.keys()]) {
     cancelTaskStream(taskId);
   }
+  for (const url of [...previewObjectUrls]) {
+    releasePreviewObjectUrl(url);
+  }
 });
 </script>
 
@@ -1152,7 +1178,12 @@ onBeforeUnmount(() => {
 
         <div class="preview-stage">
           <div v-if="previewState === 'image' && activeTask?.imageUrl" class="image-frame">
-            <img :src="activeTask.imageUrl" :alt="t.imageAlt">
+            <img
+              :src="activeTask.displayUrl || displayImageUrl(activeTask.imageUrl)"
+              :alt="t.imageAlt"
+              @load="reportPreviewImageLoad(activeTask, $event)"
+              @error="reportPreviewImageError(activeTask)"
+            >
           </div>
           <div v-else-if="previewState === 'loading'" class="preview-loading">
             <span class="preview-spinner" aria-hidden="true" />
@@ -1190,11 +1221,12 @@ onBeforeUnmount(() => {
             <div class="history-visual">
               <button type="button" class="history-thumb" @click="openHistoryPreview(record)">
                 <img
-                  :src="record.thumbnailUrl || record.imageUrl"
+                  v-if="record.thumbnailUrl"
+                  :src="record.thumbnailUrl"
                   :alt="t.imageAlt"
                   loading="lazy"
-                  @load="captureHistoryImageSize(record.id, $event)"
                 >
+                <span v-else class="history-thumb-placeholder" aria-hidden="true" />
               </button>
               <button
                 type="button"
@@ -1254,7 +1286,7 @@ onBeforeUnmount(() => {
           {{ t.closePreview }}
         </button>
         <figure class="lightbox-figure">
-          <img :src="historyPreview.imageUrl" :alt="t.imageAlt">
+          <img :src="historyPreview.localImageUrl || displayImageUrl(historyPreview.imageUrl)" :alt="t.imageAlt">
           <figcaption>{{ promptSummary(historyPreview.params.prompt) }}</figcaption>
         </figure>
       </div>
@@ -1979,6 +2011,16 @@ input[type="number"]:focus {
   height: 100%;
   object-fit: contain;
   object-position: center;
+}
+
+.history-thumb-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 7px;
+  background:
+    linear-gradient(135deg, rgba(139, 233, 253, 0.16), rgba(255, 255, 255, 0.04)),
+    #151a23;
 }
 
 .history-meta p {
