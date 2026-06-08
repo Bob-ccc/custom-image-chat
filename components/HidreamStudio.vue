@@ -1311,6 +1311,21 @@ body.hidream-body #__nuxt {
   min-width: 0;
   height: 100%;
 }
+
+@media (max-width: 768px) {
+  html.hidream-html,
+  body.hidream-body {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  body.hidream-body #__nuxt {
+    height: auto;
+    min-height: 100dvh;
+  }
+}
 </style>
 
 <style scoped>
@@ -2326,19 +2341,6 @@ input[type="number"]:focus {
 }
 
 @media (max-width: 768px) {
-  html.hidream-html,
-  body.hidream-body {
-    height: auto;
-    min-height: 100%;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
-  body.hidream-body #__nuxt {
-    height: auto;
-    min-height: 100dvh;
-  }
-
   .hidream-page {
     height: auto;
     min-height: 100dvh;
