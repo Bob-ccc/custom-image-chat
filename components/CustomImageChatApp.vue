@@ -5,7 +5,7 @@ type QualityKey = "low" | "medium" | "high" | "auto";
 type ExecutionMode = "sync" | "async";
 type TaskStatus = "SYNC_SUCCESS" | "IN_PROGRESS" | "SUCCESS" | "FAILURE";
 type MediaType = "image" | "video";
-type ImageEntryKey = "official" | "custom";
+type ImageEntryKey = "official" | "custom" | "grok";
 type CustomImageMode = "text-to-image" | "image-to-image";
 type DialogueProviderKey = "chatgpt" | "zhipu";
 type DialogueMessageRole = "user" | "assistant";
@@ -87,6 +87,7 @@ const HISTORY_IMAGE_URL_RE = /https?:\/\/[^\s"'()[\]<>]+?\.(?:png|jpe?g|webp|gif
 const STRUCTURED_HISTORY_IMAGE_KEY_RE = /^(?:url|image|image_url|imageUrl|output|result|displayUrl|localUrl|externalUrl|assetUrl|thumbnailUrl|coverUrl)$/i;
 const APIFOX_DOC_HOSTS = new Set(["value-apiqk.apifox.cn", "gpt-best.apifox.cn", "yunwu.apifox.cn"]);
 const DEFAULT_API_BASE_URL = "https://api.bltcy.ai/";
+const GROK_IMAGE_API_BASE_URL = "https://api.kaopuapi.xyz";
 const VIDEO_API_BASE_BY_CHANNEL: Record<VideoChannelKey, string> = {
   veo: "https://api.bltcy.ai/",
   "grok-openai": "https://yunwu.ai/v1/videos",
@@ -99,13 +100,11 @@ const VIDEO_API_BASE_BY_CHANNEL: Record<VideoChannelKey, string> = {
   "dimleap-happyhorse": "https://api.dimleap.cn",
 };
 const DIALOGUE_API_BASE_BY_PROVIDER: Record<DialogueProviderKey, string> = {
-  chatgpt: "https://api.openai.com/v1",
+  chatgpt: "https://yunwu.ai/v1",
   zhipu: "https://open.bigmodel.cn/api/paas/v4",
 };
 const chatgptDialogueModelOptions = [
-  "gpt-5.5",
-  "gpt-5.1",
-  "gpt-4o",
+  "gpt-5.6-luna",
 ];
 const zhipuDialogueModelOptions = [
   "glm-4.7",
@@ -118,12 +117,42 @@ const apiBaseOptions = [
 ];
 const OFFICIAL_IMAGE_DEFAULT_MODEL = "gpt-image-2-all";
 const CUSTOM_IMAGE_DEFAULT_MODEL = "gpt-image-2";
+const GROK_IMAGE_DEFAULT_MODEL = "grok-imagine-image";
 const modelOptions = [
   "gpt-image-2",
   "gpt-image-2-all",
+  "gpt-image-2-c",
   "gpt-image-2-flatfee",
   "gpt-image-2-flatfee-2k",
   "gpt-image-2-flatfee-4k",
+];
+const grokImageModelOptions = [
+  "grok-imagine-image",
+  "grok-imagine-image-quality",
+];
+const grokImageAspectRatioOptions = [
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+  "3:2",
+  "2:3",
+  "2:1",
+  "1:2",
+  "19.5:9",
+  "9:19.5",
+  "20:9",
+  "9:20",
+  "auto",
+];
+const grokImageResolutionOptions = [
+  "1k",
+  "2k",
+];
+const grokImageResponseFormatOptions = [
+  "url",
+  "b64_json",
 ];
 const videoModelOptions = [
   "veo3.1-fast",
@@ -320,6 +349,14 @@ const imageEntryOptions: Array<{
     hintEn: "Enter any OpenAI-compatible Images API base and key.",
     path: "custom base",
   },
+  {
+    key: "grok",
+    labelZh: "Grok 生图",
+    labelEn: "Grok Image",
+    hintZh: "走靠谱 API /v1/images/generations，按 Grok 官方字段提交 model、prompt、aspect_ratio、resolution、n 和 response_format。",
+    hintEn: "Uses Kaopu API /v1/images/generations with Grok official fields: model, prompt, aspect_ratio, resolution, n, and response_format.",
+    path: "/v1/images/generations",
+  },
 ];
 
 const modeOptions: Array<{
@@ -369,6 +406,7 @@ const customImageApiKey = ref("");
 const baseUrl = ref(DEFAULT_API_BASE_URL);
 const customImageBaseUrl = ref("");
 const customImageMode = ref<CustomImageMode>("text-to-image");
+const grokImageMode = ref<CustomImageMode>("text-to-image");
 const model = ref(OFFICIAL_IMAGE_DEFAULT_MODEL);
 const prompt = ref("");
 const imageUrl = ref("");
@@ -383,13 +421,13 @@ const grokInputReference = ref("");
 const selectedGrokHistoryImageKey = ref("");
 const videoImageUrls = ref(["", "", ""]);
 const selectedVideoHistoryImageKeys = ref(["", "", ""]);
-const dialogueProvider = ref<DialogueProviderKey>("zhipu");
+const dialogueProvider = ref<DialogueProviderKey>("chatgpt");
 const dialogueInput = ref("");
 const dialogueBaseUrl = ref("");
 const dialogueInputEl = ref<HTMLTextAreaElement | null>(null);
 const dialogueMessages = ref<DialogueMessage[]>([]);
 const dialogueProviderStates = ref<Record<DialogueProviderKey, DialogueProviderState>>({
-  chatgpt: { input: "", messages: [], model: "gpt-5.5", base: DIALOGUE_API_BASE_BY_PROVIDER.chatgpt },
+  chatgpt: { input: "", messages: [], model: "gpt-5.6-luna", base: DIALOGUE_API_BASE_BY_PROVIDER.chatgpt },
   zhipu: { input: "", messages: [], model: "glm-4.7", base: DIALOGUE_API_BASE_BY_PROVIDER.zhipu },
 });
 const dialogueMessagesEl = ref<HTMLElement | null>(null);
@@ -429,6 +467,9 @@ const dimleapHappyhorseSeedEnabled = ref(false);
 const dimleapHappyhorseSeed = ref(12345);
 const size = ref("1024x1024");
 const quality = ref<QualityKey>("auto");
+const grokImageAspectRatio = ref("1:1");
+const grokImageResolution = ref("1k");
+const grokImageResponseFormat = ref("url");
 const count = ref(1);
 const b64Json = ref(false);
 const loading = ref(false);
@@ -455,8 +496,12 @@ const currentMode = computed(() => modeOptions.find((item) => item.key === mode.
 const isVideoMode = computed(() => mode.value === "video");
 const isDialogueMode = computed(() => mode.value === "dialogue");
 const isImageMode = computed(() => !isVideoMode.value && !isDialogueMode.value);
+const isOfficialImageEntry = computed(() => isImageMode.value && imageEntry.value === "official");
 const isCustomImageEntry = computed(() => isImageMode.value && imageEntry.value === "custom");
+const isGrokImageEntry = computed(() => isImageMode.value && imageEntry.value === "grok");
 const isCustomImageToImage = computed(() => isCustomImageEntry.value && customImageMode.value === "image-to-image");
+const isGrokImageToImage = computed(() => isGrokImageEntry.value && grokImageMode.value === "image-to-image");
+const isImageEntryToImage = computed(() => isCustomImageToImage.value || isGrokImageToImage.value);
 const isGrokOpenAIFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "grok-openai");
 const isGrokUnifiedFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "grok-unified");
 const isVeoUnifiedFormatChannel = computed(() => isVideoMode.value && videoChannel.value === "veo-unified");
@@ -475,17 +520,19 @@ const activeModelOptions = computed(() => isVideoMode.value
   ? (isGrokOpenAIFormatChannel.value ? grokVideoModelOptions : isGrokUnifiedFormatChannel.value ? grokUnifiedVideoModelOptions : isVeoUnifiedFormatChannel.value ? veoUnifiedVideoModelOptions : isVeoOpenAIFormatChannel.value ? veoOpenAIVideoModelOptions : isZhipuCogVideoChannel.value ? zhipuCogVideoModelOptions : isLingyaSoraChannel.value ? lingyaSoraModelOptions : isYunwuViduChannel.value ? yunwuViduModelOptions : isDimleapHappyhorseChannel.value ? dimleapHappyhorseModelOptions : videoModelOptions)
   : isDialogueMode.value
   ? (dialogueProvider.value === "zhipu" ? zhipuDialogueModelOptions : chatgptDialogueModelOptions)
-  : isCustomImageEntry.value && !modelOptions.includes(model.value)
+  : isGrokImageEntry.value
+    ? grokImageModelOptions
+    : isCustomImageEntry.value && !modelOptions.includes(model.value)
     ? [model.value, ...modelOptions]
     : modelOptions);
 const currentYunwuViduDurationOptions = computed(() => model.value === "viduq2-turbo"
   ? yunwuViduDurationOptions.slice(0, 10)
   : yunwuViduDurationOptions);
-const effectiveBaseUrl = computed(() => isDialogueMode.value ? (dialogueBaseUrl.value.trim() || DIALOGUE_API_BASE_BY_PROVIDER[dialogueProvider.value]) : isVideoMode.value ? videoBaseForChannel(videoChannel.value) : isCustomImageEntry.value ? customImageBaseUrl.value.trim() : baseUrl.value.trim());
+const effectiveBaseUrl = computed(() => isDialogueMode.value ? (dialogueBaseUrl.value.trim() || DIALOGUE_API_BASE_BY_PROVIDER[dialogueProvider.value]) : isVideoMode.value ? videoBaseForChannel(videoChannel.value) : isCustomImageEntry.value ? customImageBaseUrl.value.trim() : isGrokImageEntry.value ? GROK_IMAGE_API_BASE_URL : baseUrl.value.trim());
 const customImageEndpointPath = computed(() => isCustomImageToImage.value ? "/v1/images/edits" : "/v1/images/generations");
 const customImageGenerationEndpoint = computed(() => isCustomImageEntry.value ? buildCustomPreviewEndpoint(customImageBaseUrl.value, customImageEndpointPath.value) : "");
 const effectiveApiKey = computed(() => isCustomImageEntry.value ? customImageApiKey.value : apiKey.value);
-const needsImage = computed(() => mode.value === "edit" || mode.value === "image-chat" || isCustomImageToImage.value);
+const needsImage = computed(() => mode.value === "edit" || mode.value === "image-chat" || isImageEntryToImage.value);
 const isGrokSingleReferenceMode = computed(() => isGrokOpenAIFormatChannel.value && grokReferenceMode.value === "single");
 const isGrokMultiReferenceMode = computed(() => isGrokOpenAIFormatChannel.value && grokReferenceMode.value === "multi");
 const videoImageLimit = computed(() => {
@@ -503,8 +550,8 @@ const videoImageLimit = computed(() => {
   return 0;
 });
 const videoAllowsImages = computed(() => isVideoMode.value && videoImageLimit.value > 0);
-const supportsImageInput = computed(() => (mode.value === "generation" && !isCustomImageEntry.value) || needsImage.value || videoAllowsImages.value || (isGrokOpenAIFormatChannel.value && isGrokSingleReferenceMode.value));
-const asyncAvailable = computed(() => mode.value === "generation" && !isCustomImageEntry.value);
+const supportsImageInput = computed(() => (mode.value === "generation" && isOfficialImageEntry.value) || needsImage.value || videoAllowsImages.value || (isGrokOpenAIFormatChannel.value && isGrokSingleReferenceMode.value));
+const asyncAvailable = computed(() => mode.value === "generation" && isOfficialImageEntry.value);
 const videoDocUrl = computed(() => {
   if (isLingyaSoraChannel.value) return "https://api.lingyaai.cn/doc/#/coding/sora-2-unify";
   if (isDimleapHappyhorseChannel.value) return `https://dimleap.cn/models/playground?model=${model.value === "happyhorse-1.0-r2v" ? "happyhorse-1.0-r2v" : "happyhorse-1.0-i2v"}&categoryId=video`;
@@ -527,7 +574,7 @@ const videoStatusDocUrl = computed(() => {
   if (isGrokOpenAIFormatChannel.value) return "https://yunwu.apifox.cn/api-428940785";
   return "";
 });
-const endpointPath = computed(() => isZhipuCogVideoChannel.value ? "/videos/generations" : isDimleapHappyhorseChannel.value ? "/v1/video/generations" : isLingyaSoraChannel.value ? "/v1/video/create" : isYunwuViduChannel.value ? (videoImages.value.length >= 2 ? "/ent/v2/start-end2video" : "/ent/v2/img2video") : isYunwuUnifiedVideoChannel.value ? "/v1/video/create" : isGrokOpenAIFormatChannel.value || isVeoOpenAIFormatChannel.value ? "/v1/videos" : currentMode.value.path);
+const endpointPath = computed(() => isGrokImageEntry.value ? (isGrokImageToImage.value ? "/v1/images/edits" : "/v1/images/generations") : isZhipuCogVideoChannel.value ? "/videos/generations" : isDimleapHappyhorseChannel.value ? "/v1/video/generations" : isLingyaSoraChannel.value ? "/v1/video/create" : isYunwuViduChannel.value ? (videoImages.value.length >= 2 ? "/ent/v2/start-end2video" : "/ent/v2/img2video") : isYunwuUnifiedVideoChannel.value ? "/v1/video/create" : isGrokOpenAIFormatChannel.value || isVeoOpenAIFormatChannel.value ? "/v1/videos" : currentMode.value.path);
 const statusEndpointPath = computed(() => {
   if (!isVideoMode.value) return "";
   if (isZhipuCogVideoChannel.value) return "/async-result/{id}";
@@ -537,6 +584,14 @@ const statusEndpointPath = computed(() => {
   if (isLingyaSoraChannel.value) return "/v1/video/query?id={id}";
   if (isYunwuUnifiedVideoChannel.value || isGrokOpenAIFormatChannel.value) return "/v1/video/query?id={id}";
   return "/v2/videos/generations/{id}";
+});
+const imageDocUrl = computed(() => {
+  if (isGrokImageEntry.value) {
+    return isGrokImageToImage.value
+      ? "https://docs.x.ai/developers/model-capabilities/images/editing"
+      : "https://docs.x.ai/developers/model-capabilities/images/generation";
+  }
+  return currentMode.value.docUrl;
 });
 const endpointPreview = computed(() => {
   if (isCustomImageEntry.value) {
@@ -741,25 +796,33 @@ const copy = computed(() => {
 const sanitizedRequest = computed(() => {
   const provider = {
     base: effectiveBaseUrl.value,
-    imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : undefined,
+    imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : isGrokImageEntry.value ? endpointPath.value : undefined,
     model: model.value.trim(),
     key: effectiveApiKey.value ? "Bearer ***REDACTED***" : "",
   };
   const base = {
-    mode: isCustomImageToImage.value ? "edit" : mode.value,
+    mode: isImageEntryToImage.value ? "edit" : mode.value,
     imageEntry: isVideoMode.value ? undefined : imageEntry.value,
     executionMode: isVideoMode.value ? "async-task" : executionMode.value,
     provider,
     endpointPath: endpointPath.value,
     upstreamUrl: endpointPreview.value,
-    documentationUrl: isVideoMode.value ? videoDocUrl.value : currentMode.value.docUrl,
+    documentationUrl: isVideoMode.value ? videoDocUrl.value : imageDocUrl.value,
     statusDocumentationUrl: isVideoMode.value ? videoStatusDocUrl.value : undefined,
     statusEndpointPath: isVideoMode.value ? statusEndpointPath.value : undefined,
     prompt: prompt.value,
   } as Record<string, unknown>;
   if (!isVideoMode.value) {
-    base.size = size.value;
-    base.quality = quality.value;
+    if (isGrokImageEntry.value) {
+      base.omitImageParams = true;
+      base.grokImageMode = grokImageMode.value;
+      base.aspect_ratio = grokImageAspectRatio.value;
+      base.resolution = grokImageResolution.value;
+      base.response_format = grokImageResponseFormat.value;
+    } else {
+      base.size = size.value;
+      base.quality = quality.value;
+    }
     if (isCustomImageEntry.value) {
       base.customImageMode = customImageMode.value;
       base.imageEndpoint = customImageEndpointPath.value;
@@ -842,11 +905,11 @@ const sanitizedRequest = computed(() => {
   }
   if (mode.value === "generation" && !isCustomImageEntry.value) {
     base.n = count.value;
-    if (generationImages.value.length) {
+    if (isOfficialImageEntry.value && generationImages.value.length) {
       base.image = generationImages.value;
     }
   }
-  if (mode.value === "edit" || isCustomImageToImage.value) {
+  if (mode.value === "edit" || isImageEntryToImage.value) {
     base.n = count.value;
     base.image = imageFileName.value || (imageUrl.value ? "[image-url]" : "");
   }
@@ -1001,7 +1064,9 @@ function sanitizeHistoryRecord(record: unknown): ChatHistoryRecord | null {
   ]);
   const videos = Array.isArray(item.videos) ? item.videos.map((url) => String(url || "").trim()).filter(Boolean) : [];
   const recordBase = String(item.base || "");
-  const imageEntryValue: ImageEntryKey = mediaType === "image" && (item.imageEntry === "custom" || (recordBase && !apiBaseOptions.includes(recordBase)))
+  const imageEntryValue: ImageEntryKey = mediaType === "image" && item.imageEntry === "grok"
+    ? "grok"
+    : mediaType === "image" && (item.imageEntry === "custom" || (recordBase && !apiBaseOptions.includes(recordBase) && recordBase !== GROK_IMAGE_API_BASE_URL))
     ? "custom"
     : "official";
   return {
@@ -1158,7 +1223,9 @@ function migrateLegacyApiKeys() {
 function activeApiKeyStorageKey() {
   if (isDialogueMode.value) return `chat:${dialogueProvider.value}`;
   if (isVideoMode.value) return `video:${videoChannel.value}`;
-  return imageEntry.value === "custom" ? "custom-image" : "official-image";
+  if (imageEntry.value === "custom") return "custom-image";
+  if (imageEntry.value === "grok") return "grok-image";
+  return "official-image";
 }
 
 function activeApiKeyRef() {
@@ -1187,7 +1254,7 @@ function switchActiveApiKey(update: () => void) {
 
 function apiKeyForRecord(record: ChatHistoryRecord) {
   if (record.mediaType === "video") return getStoredApiKey(`video:${record.videoChannel || "veo"}`);
-  return getStoredApiKey(record.imageEntry === "custom" ? "custom-image" : "official-image");
+  return getStoredApiKey(record.imageEntry === "custom" ? "custom-image" : record.imageEntry === "grok" ? "grok-image" : "official-image");
 }
 
 function persistImageEntry() {
@@ -1217,7 +1284,7 @@ function loadCustomImageProvider() {
   if (!import.meta.client) return;
   try {
     const savedEntry = localStorage.getItem(IMAGE_ENTRY_STORAGE_KEY);
-    if (savedEntry === "custom" || savedEntry === "official") {
+    if (savedEntry === "custom" || savedEntry === "official" || savedEntry === "grok") {
       imageEntry.value = savedEntry;
       model.value = defaultImageModelForEntry(savedEntry);
     }
@@ -1284,6 +1351,7 @@ function safeDialogueModelForProvider(provider: DialogueProviderKey, value: unkn
 
 function safeDialogueBaseForProvider(provider: DialogueProviderKey, value: unknown) {
   const raw = String(value || "").trim();
+  if (provider === "chatgpt" && raw === "https://api.openai.com/v1") return DIALOGUE_API_BASE_BY_PROVIDER.chatgpt;
   return raw && raw.length <= 500 ? raw : DIALOGUE_API_BASE_BY_PROVIDER[provider];
 }
 
@@ -1348,11 +1416,15 @@ function persistChatUiState() {
       mode: mode.value,
       imageEntry: imageEntry.value,
       customImageMode: customImageMode.value,
+      grokImageMode: grokImageMode.value,
       executionMode: executionMode.value,
       selectedHistoryImageKey: selectedHistoryImageKey.value,
       generationImageUrls: generationImageUrls.value,
       selectedGenerationHistoryImageKeys: selectedGenerationHistoryImageKeys.value,
       imageUrl: imageUrl.value,
+      grokImageAspectRatio: grokImageAspectRatio.value,
+      grokImageResolution: grokImageResolution.value,
+      grokImageResponseFormat: grokImageResponseFormat.value,
       videoChannel: videoChannel.value,
       grokReferenceMode: grokReferenceMode.value,
       grokInputReference: grokInputReference.value,
@@ -1380,14 +1452,20 @@ function loadChatUiState() {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
     const state = parsed as Record<string, unknown>;
     if (state.mode === "generation" || state.mode === "edit" || state.mode === "image-chat" || state.mode === "text-chat" || state.mode === "video" || state.mode === "dialogue") mode.value = state.mode;
-    if (state.imageEntry === "official" || state.imageEntry === "custom") imageEntry.value = state.imageEntry;
+    if (state.imageEntry === "official" || state.imageEntry === "custom" || state.imageEntry === "grok") imageEntry.value = state.imageEntry;
     if (state.customImageMode === "text-to-image" || state.customImageMode === "image-to-image") customImageMode.value = state.customImageMode;
+    if (state.grokImageMode === "text-to-image" || state.grokImageMode === "image-to-image") grokImageMode.value = state.grokImageMode;
     if (state.executionMode === "sync" || state.executionMode === "async") executionMode.value = state.executionMode;
     if (typeof state.selectedHistoryImageKey === "string") selectedHistoryImageKey.value = state.selectedHistoryImageKey;
     const restoredGenerationUrls = compactCachedStringArray(state.generationImageUrls, 10);
     generationImageUrls.value = restoredGenerationUrls.length ? restoredGenerationUrls : [""];
     selectedGenerationHistoryImageKeys.value = fixedCachedNullableStringArray(state.selectedGenerationHistoryImageKeys, generationImageUrls.value.length);
     if (typeof state.imageUrl === "string" && state.imageUrl.length <= 2_000_000) imageUrl.value = state.imageUrl;
+    if (typeof state.grokImageAspectRatio === "string" && grokImageAspectRatioOptions.includes(state.grokImageAspectRatio)) grokImageAspectRatio.value = state.grokImageAspectRatio;
+    else if (typeof state.grokImageSize === "string" && state.grokImageSize === "1024x1024") grokImageAspectRatio.value = "1:1";
+    if (typeof state.grokImageResolution === "string" && grokImageResolutionOptions.includes(state.grokImageResolution)) grokImageResolution.value = state.grokImageResolution;
+    else if (typeof state.grokImageSize === "string" && state.grokImageSize === "2048x2048") grokImageResolution.value = "2k";
+    if (typeof state.grokImageResponseFormat === "string" && grokImageResponseFormatOptions.includes(state.grokImageResponseFormat)) grokImageResponseFormat.value = state.grokImageResponseFormat;
     if (typeof state.videoChannel === "string" && VIDEO_API_BASE_BY_CHANNEL[state.videoChannel as VideoChannelKey]) videoChannel.value = state.videoChannel as VideoChannelKey;
     if (state.grokReferenceMode === "single" || state.grokReferenceMode === "multi") grokReferenceMode.value = state.grokReferenceMode;
     if (typeof state.grokInputReference === "string" && state.grokInputReference.length <= 2_000_000) grokInputReference.value = state.grokInputReference;
@@ -1446,11 +1524,12 @@ function dialogueProviderLabel(provider: DialogueProviderKey) {
 }
 
 function defaultImageModelForEntry(entry: ImageEntryKey) {
+  if (entry === "grok") return GROK_IMAGE_DEFAULT_MODEL;
   return entry === "custom" ? CUSTOM_IMAGE_DEFAULT_MODEL : OFFICIAL_IMAGE_DEFAULT_MODEL;
 }
 
 function defaultDialogueModelForProvider(provider: DialogueProviderKey) {
-  return provider === "zhipu" ? "glm-4.7" : "gpt-5.5";
+  return provider === "zhipu" ? "glm-4.7" : "gpt-5.6-luna";
 }
 
 function defaultVideoModelForChannel(channel: VideoChannelKey) {
@@ -1508,6 +1587,10 @@ function selectImageEntry(nextEntry: ImageEntryKey) {
     imageEntry.value = nextEntry;
     mode.value = "generation";
     if (nextEntry === "custom") customImageMode.value = "text-to-image";
+    if (nextEntry === "grok") {
+      executionMode.value = "sync";
+      grokImageMode.value = "text-to-image";
+    }
     model.value = defaultImageModelForEntry(nextEntry);
   });
 }
@@ -1601,7 +1684,7 @@ function statusClass(record: ChatHistoryRecord) {
 }
 
 function currentImageInputLabel() {
-  if (isCustomImageToImage.value) {
+  if (isImageEntryToImage.value) {
     if (customEditImages.value.length) return imageCountText(customEditImages.value.length);
     return "";
   }
@@ -1668,10 +1751,10 @@ function saveHistoryRecord(data: unknown, images: string[]) {
     imageEntry: imageEntry.value,
     createdAt: now,
     updatedAt: now,
-    mode: mode.value,
+    mode: isGrokImageToImage.value ? "edit" : mode.value,
     model: model.value.trim(),
     base: effectiveBaseUrl.value,
-    imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : "",
+    imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : isGrokImageEntry.value ? endpointPath.value : "",
     prompt: prompt.value,
     size: size.value,
     quality: quality.value,
@@ -1682,7 +1765,7 @@ function saveHistoryRecord(data: unknown, images: string[]) {
     failReason: "",
     upstreamUrl: typeof (data as any)?.upstreamUrl === "string" ? (data as any).upstreamUrl : "",
     imageInputLabel: currentImageInputLabel(),
-    imageInputValue: isCustomImageToImage.value ? customEditImages.value.join("\n") : mode.value === "generation" ? generationImages.value.join("\n") : imageUrl.value.trim(),
+    imageInputValue: isImageEntryToImage.value ? customEditImages.value.join("\n") : mode.value === "generation" ? generationImages.value.join("\n") : imageUrl.value.trim(),
     videoChannel: "veo",
     grokReferenceMode: "single",
     videoImages: [],
@@ -1764,12 +1847,16 @@ function currentHistoryConfig(): Record<string, unknown> {
     imageEntry: imageEntry.value,
     executionMode: executionMode.value,
     customImageMode: customImageMode.value,
+    grokImageMode: grokImageMode.value,
     baseUrl: baseUrl.value,
     customImageBaseUrl: customImageBaseUrl.value,
     customImageEndpointPath: customImageEndpointPath.value,
     b64Json: b64Json.value,
     generationImageUrls: [...generationImageUrls.value],
     imageUrl: imageUrl.value,
+    grokImageAspectRatio: grokImageAspectRatio.value,
+    grokImageResolution: grokImageResolution.value,
+    grokImageResponseFormat: grokImageResponseFormat.value,
     videoChannel: videoChannel.value,
     grokReferenceMode: grokReferenceMode.value,
     grokInputReference: grokInputReference.value,
@@ -1852,15 +1939,26 @@ function configStringArray(config: Record<string, unknown>, key: string) {
 
 function applyHistoryConfig(record: ChatHistoryRecord) {
   const config = record.config || {};
-  if (config.imageEntry === "official" || config.imageEntry === "custom") imageEntry.value = config.imageEntry;
+  if (config.imageEntry === "official" || config.imageEntry === "custom" || config.imageEntry === "grok") imageEntry.value = config.imageEntry;
   if (config.executionMode === "sync" || config.executionMode === "async") executionMode.value = config.executionMode;
   if (config.customImageMode === "text-to-image" || config.customImageMode === "image-to-image") customImageMode.value = config.customImageMode;
+  if (config.grokImageMode === "text-to-image" || config.grokImageMode === "image-to-image") grokImageMode.value = config.grokImageMode;
   baseUrl.value = configString(config, "baseUrl", baseUrl.value);
   customImageBaseUrl.value = configString(config, "customImageBaseUrl", customImageBaseUrl.value);
   b64Json.value = configBoolean(config, "b64Json", b64Json.value);
   const restoredGenerationUrls = configStringArray(config, "generationImageUrls");
   if (restoredGenerationUrls.length) generationImageUrls.value = restoredGenerationUrls;
   imageUrl.value = configString(config, "imageUrl", imageUrl.value);
+  grokImageAspectRatio.value = configString(config, "grokImageAspectRatio", grokImageAspectRatio.value);
+  if (!grokImageAspectRatioOptions.includes(grokImageAspectRatio.value)) {
+    grokImageAspectRatio.value = configString(config, "grokImageSize", "") === "1024x1024" ? "1:1" : "1:1";
+  }
+  grokImageResolution.value = configString(config, "grokImageResolution", grokImageResolution.value);
+  if (!grokImageResolutionOptions.includes(grokImageResolution.value)) {
+    grokImageResolution.value = configString(config, "grokImageSize", "") === "2048x2048" ? "2k" : "1k";
+  }
+  grokImageResponseFormat.value = configString(config, "grokImageResponseFormat", grokImageResponseFormat.value);
+  if (!grokImageResponseFormatOptions.includes(grokImageResponseFormat.value)) grokImageResponseFormat.value = "url";
   if (config.videoChannel && VIDEO_API_BASE_BY_CHANNEL[config.videoChannel as VideoChannelKey]) videoChannel.value = config.videoChannel as VideoChannelKey;
   if (config.grokReferenceMode === "single" || config.grokReferenceMode === "multi") grokReferenceMode.value = config.grokReferenceMode;
   grokInputReference.value = configString(config, "grokInputReference", grokInputReference.value);
@@ -1910,6 +2008,9 @@ function restoreHistory(record: ChatHistoryRecord) {
     if (record.imageEntry === "custom") {
       customImageBaseUrl.value = record.base || customImageBaseUrl.value;
       customImageMode.value = record.mode === "edit" ? "image-to-image" : "text-to-image";
+    } else if (record.imageEntry === "grok") {
+      executionMode.value = "sync";
+      grokImageMode.value = record.mode === "edit" ? "image-to-image" : "text-to-image";
     } else {
       baseUrl.value = record.base || DEFAULT_API_BASE_URL;
     }
@@ -2132,11 +2233,15 @@ watch([
   model,
   imageEntry,
   customImageMode,
+  grokImageMode,
   executionMode,
   selectedHistoryImageKey,
   generationImageUrls,
   selectedGenerationHistoryImageKeys,
   imageUrl,
+  grokImageAspectRatio,
+  grokImageResolution,
+  grokImageResponseFormat,
   videoChannel,
   grokReferenceMode,
   grokInputReference,
@@ -2167,6 +2272,20 @@ watch(customImageMode, (value: CustomImageMode) => {
   persistCustomImageProvider();
 });
 watch(customImageApiKey, persistCustomImageProvider);
+
+watch(grokImageMode, (value: CustomImageMode) => {
+  mode.value = "generation";
+  if (value === "text-to-image") {
+    imageUrl.value = "";
+    imageDataUrl.value = "";
+    imageFileName.value = "";
+    selectedHistoryImageKey.value = "";
+  } else {
+    const existingImages = generationImageUrls.value.map((url: string) => url.trim()).filter(Boolean);
+    generationImageUrls.value = existingImages.length ? [...existingImages, ""].slice(0, 10) : [""];
+    selectedGenerationHistoryImageKeys.value = generationImageUrls.value.map(() => "");
+  }
+});
 
 useHead({
   title: "调试台",
@@ -2567,7 +2686,7 @@ function handleFile(event: Event) {
   const file = files[0];
   if (!file) return;
   selectedHistoryImageKey.value = "";
-  if (isCustomImageToImage.value) {
+  if (isImageEntryToImage.value) {
     const readers = files.slice(0, Math.max(0, 10 - customEditImages.value.length)).map((item) => blobToBase64(item));
     Promise.all(readers)
       .then((dataUrls) => {
@@ -3049,10 +3168,10 @@ async function submit() {
       return;
     }
     const payload: Record<string, unknown> = {
-      mode: isCustomImageToImage.value ? "edit" : mode.value,
+      mode: isImageEntryToImage.value ? "edit" : mode.value,
       provider: {
         base: effectiveBaseUrl.value,
-        imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : undefined,
+        imageEndpoint: isCustomImageEntry.value ? customImageEndpointPath.value : isGrokImageEntry.value ? endpointPath.value : undefined,
         key: effectiveApiKey.value,
         model: model.value.trim(),
       },
@@ -3062,16 +3181,22 @@ async function submit() {
       n: count.value,
       b64_json: !isCustomImageEntry.value && mode.value === "generation" ? b64Json.value : false,
     };
-    if (isCustomImageToImage.value && !customEditImages.value.length) {
+    if (isGrokImageEntry.value) {
+      payload.omitImageParams = true;
+      payload.aspect_ratio = grokImageAspectRatio.value;
+      payload.resolution = grokImageResolution.value;
+      payload.response_format = grokImageResponseFormat.value;
+    }
+    if (isImageEntryToImage.value && !customEditImages.value.length) {
       errorMessage.value = lang.value === "zh" ? "图生图需要至少 1 张输入图片。" : "Image-to-image requires at least 1 source image.";
       stopCountdown();
       return;
     }
-    if (isCustomImageToImage.value) {
+    if (isImageEntryToImage.value) {
       payload.image = customEditImages.value;
     } else if (needsImage.value) {
       payload.image = imageSource.value;
-    } else if (!isCustomImageEntry.value && mode.value === "generation" && generationImages.value.length) {
+    } else if (isOfficialImageEntry.value && mode.value === "generation" && generationImages.value.length) {
       payload.image = generationImages.value;
     }
     const response = await fetch("/api/chat/image-generate", {
@@ -3473,7 +3598,28 @@ async function submit() {
                 </button>
               </div>
             </div>
-            <label v-else-if="!isVideoMode">
+            <div v-if="isGrokImageEntry" class="execution-switch">
+              <span>{{ copy.customImageType }}</span>
+              <div>
+                <button
+                  type="button"
+                  class="mode-choice"
+                  :class="{ active: grokImageMode === 'text-to-image' }"
+                  @click="grokImageMode = 'text-to-image'"
+                >
+                  {{ copy.textToImage }}
+                </button>
+                <button
+                  type="button"
+                  class="mode-choice"
+                  :class="{ active: grokImageMode === 'image-to-image' }"
+                  @click="grokImageMode = 'image-to-image'"
+                >
+                  {{ copy.imageToImage }}
+                </button>
+              </div>
+            </div>
+            <label v-else-if="!isVideoMode && !isGrokImageEntry && !isCustomImageEntry">
               <span>{{ copy.baseUrl }}</span>
               <select v-model="baseUrl">
                 <option v-for="item in apiBaseOptions" :key="item" :value="item">
@@ -3481,13 +3627,18 @@ async function submit() {
                 </option>
               </select>
             </label>
+            <div v-else-if="isGrokImageEntry" class="readonly-base">
+              <span>{{ copy.baseUrl }}</span>
+              <code>{{ effectiveBaseUrl }}</code>
+              <small>{{ lang === "zh" ? "Grok 生图固定使用靠谱 API Base。" : "Grok image uses the fixed Kaopu API base." }}</small>
+            </div>
             <div v-else class="readonly-base">
               <span>{{ copy.baseUrl }}</span>
               <code>{{ effectiveBaseUrl }}</code>
               <small>{{ copy.autoVideoBaseHint }}</small>
             </div>
             <p v-if="apiBaseWarning" class="warning-box" role="status">{{ apiBaseWarning }}</p>
-            <div v-if="!isVideoMode && !isCustomImageEntry" class="execution-switch">
+            <div v-if="!isVideoMode && !isCustomImageEntry && !isGrokImageEntry" class="execution-switch">
               <span>{{ copy.executionMode }}</span>
               <div>
                 <button
@@ -3514,7 +3665,7 @@ async function submit() {
             <div v-if="!isCustomImageEntry" class="endpoint-stack">
               <p>
                 <span>{{ copy.docUrl }}</span>
-                <a :href="isVideoMode ? videoDocUrl : currentMode.docUrl" target="_blank" rel="noreferrer">{{ isVideoMode ? videoDocUrl : currentMode.docUrl }}</a>
+                <a :href="isVideoMode ? videoDocUrl : imageDocUrl" target="_blank" rel="noreferrer">{{ isVideoMode ? videoDocUrl : imageDocUrl }}</a>
               </p>
               <p>
                 <span>{{ copy.endpointPath }}</span>
@@ -3605,10 +3756,10 @@ async function submit() {
                 <small>{{ isZhipuCogVideoChannel ? copy.zhipuReferenceHint : isDimleapHappyhorseChannel ? copy.dimleapHappyhorseReferenceHint : isVeoOpenAIFormatChannel ? copy.veoOpenAIReferenceHint : isVeoUnifiedFormatChannel ? copy.veoUnifiedReferenceHint : isGrokUnifiedFormatChannel ? copy.grokUnifiedReferenceHint : isYunwuVideoChannel ? (isGrokSingleReferenceMode ? copy.grokSingleReferenceHint : copy.grokMultiReferenceHint) : copy.videoImageHint }}</small>
               </template>
               <template v-else>
-                <template v-if="mode === 'generation' && (!isCustomImageEntry || isCustomImageToImage)">
+                <template v-if="mode === 'generation' && (isOfficialImageEntry || isImageEntryToImage)">
                   <div v-for="(_, index) in generationImageUrls" :key="`generation-image-${index}`" class="reference-row">
                     <label>
-                      <span>{{ isCustomImageToImage ? customEditImageLabel(index) : `${copy.optionalReferenceImage} ${index + 1}` }}</span>
+                      <span>{{ isImageEntryToImage ? customEditImageLabel(index) : `${copy.optionalReferenceImage} ${index + 1}` }}</span>
                       <input
                         v-model="generationImageUrls[index]"
                         autocomplete="off"
@@ -3633,9 +3784,9 @@ async function submit() {
                   <button type="button" class="secondary" :disabled="generationImageUrls.length >= 10" @click="addGenerationImageInput">
                     {{ copy.addReferenceImage }}
                   </button>
-                  <small v-if="!isCustomImageToImage">{{ copy.imageHint }}</small>
+                  <small v-if="!isImageEntryToImage">{{ copy.imageHint }}</small>
                 </template>
-                <label v-else-if="needsImage && !isCustomImageToImage">
+                <label v-else-if="needsImage && !isImageEntryToImage">
                   <span>{{ copy.imageUrl }}</span>
                   <input
                     v-model="imageUrl"
@@ -3645,7 +3796,7 @@ async function submit() {
                     @input="selectedHistoryImageKey = ''"
                   />
                 </label>
-                <label v-if="mode !== 'generation' && !isCustomImageToImage && historyImageOptions.length">
+                <label v-if="mode !== 'generation' && !isImageEntryToImage && historyImageOptions.length">
                   <span>{{ copy.historyImage }}</span>
                   <select v-model="selectedHistoryImageKey" @change="selectHistoryImage">
                     <option value="">{{ copy.historyImagePlaceholder }}</option>
@@ -3656,9 +3807,9 @@ async function submit() {
                 </label>
                 <label v-if="needsImage" class="upload-box">
                   <span>{{ copy.inputImage }}</span>
-                  <input type="file" accept="image/*" :multiple="isCustomImageToImage" @change="handleFile" />
+                  <input type="file" accept="image/*" :multiple="isImageEntryToImage" @change="handleFile" />
                   <strong>{{ copy.upload }}</strong>
-                  <small>{{ isCustomImageToImage && customEditImages.length ? `${copy.uploadedImageCount}: ${customEditImages.length}` : imageFileName || copy.noUpload }}</small>
+                  <small>{{ isImageEntryToImage && customEditImages.length ? `${copy.uploadedImageCount}: ${customEditImages.length}` : imageFileName || copy.noUpload }}</small>
                 </label>
               </template>
             </div>
@@ -3667,7 +3818,15 @@ async function submit() {
 
           <section v-if="!isVideoMode" class="card param-card">
             <h2>{{ lang === "zh" ? "参数" : "Parameters" }}</h2>
-            <label>
+            <label v-if="isGrokImageEntry">
+              <span>{{ lang === "zh" ? "比例" : "Aspect Ratio" }}</span>
+              <select v-model="grokImageAspectRatio">
+                <option v-for="item in grokImageAspectRatioOptions" :key="item" :value="item">
+                  {{ item }}
+                </option>
+              </select>
+            </label>
+            <label v-else>
               <span>{{ copy.size }}</span>
               <select v-model="size">
                 <option v-for="item in sizeOptions" :key="item.value" :value="item.value">
@@ -3675,7 +3834,15 @@ async function submit() {
                 </option>
               </select>
             </label>
-            <label>
+            <label v-if="isGrokImageEntry">
+              <span>{{ lang === "zh" ? "分辨率" : "Resolution" }}</span>
+              <select v-model="grokImageResolution">
+                <option v-for="item in grokImageResolutionOptions" :key="item" :value="item">
+                  {{ item }}
+                </option>
+              </select>
+            </label>
+            <label v-else>
               <span>{{ copy.quality }}</span>
               <select v-model="quality">
                 <option v-for="item in qualityOptions" :key="item.value" :value="item.value">
@@ -3683,11 +3850,19 @@ async function submit() {
                 </option>
               </select>
             </label>
+            <label v-if="isGrokImageEntry">
+              <span>{{ lang === "zh" ? "返回方式" : "Response Format" }}</span>
+              <select v-model="grokImageResponseFormat">
+                <option v-for="item in grokImageResponseFormatOptions" :key="item" :value="item">
+                  {{ item }}
+                </option>
+              </select>
+            </label>
             <label v-if="mode === 'generation' || mode === 'edit' || isCustomImageToImage">
               <span>{{ copy.count }}</span>
               <input v-model.number="count" type="number" min="1" max="10" />
             </label>
-            <label v-if="mode === 'generation' && !isCustomImageEntry">
+            <label v-if="mode === 'generation' && isOfficialImageEntry">
               <span>{{ copy.b64Json }}</span>
               <select v-model="b64Json">
                 <option :value="false">false</option>

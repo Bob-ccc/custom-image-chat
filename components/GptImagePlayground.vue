@@ -43,7 +43,7 @@ const MAX_IMAGES = 10;
 const MIN_CUSTOM_PIXELS = 655360;
 const MAX_CUSTOM_PIXELS = 8294400;
 
-const modelOptions = ["gpt-image-2", "gpt-image-2-all", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
+const modelOptions = ["gpt-image-2", "gpt-image-2-all", "gpt-image-2-c", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
 const qualityOptions: QualityKey[] = ["auto", "low", "medium", "high"];
 const outputFormatOptions: OutputFormat[] = ["png", "jpeg", "webp"];
 const backgroundOptions: BackgroundMode[] = ["auto", "transparent", "opaque"];

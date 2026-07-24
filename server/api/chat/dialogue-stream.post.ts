@@ -10,7 +10,7 @@ import {
 } from "../../lib/chat-image-proxy";
 
 const SUPPORTED_ZHIPU_MODELS = new Set(["glm-4.7", "glm-4.6v", "glm-4.5-air"]);
-const SUPPORTED_OPENAI_MODELS = new Set(["gpt-5.5", "gpt-5.1", "gpt-4o"]);
+const SUPPORTED_OPENAI_MODELS = new Set(["gpt-5.6-luna"]);
 const SUPPORTED_ROLES = new Set(["system", "user", "assistant"]);
 type DialogueProviderName = "chatgpt" | "zhipu";
 
@@ -123,7 +123,7 @@ export default defineEventHandler(async (event) => {
   const providerError = assertProvider(event, base, key, model);
   if (providerError) return providerError;
   if (providerName === "chatgpt" && !SUPPORTED_OPENAI_MODELS.has(model)) {
-    return fail(event, 400, "UNSUPPORTED_MODEL", "ChatGPT 对话仅支持 gpt-5.5、gpt-5.1、gpt-4o。");
+    return fail(event, 400, "UNSUPPORTED_MODEL", "ChatGPT 对话仅支持 gpt-5.6-luna。");
   }
   if (providerName === "zhipu" && !SUPPORTED_ZHIPU_MODELS.has(model)) {
     return fail(event, 400, "UNSUPPORTED_MODEL", "智谱对话仅支持 glm-4.7、glm-4.6v、glm-4.5-air。");

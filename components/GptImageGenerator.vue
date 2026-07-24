@@ -39,7 +39,7 @@ const DEFAULT_MODEL = "gpt-image-2";
 const DEFAULT_BASE_URL = "https://api.openai.com";
 const MAX_SOURCE_IMAGES = 10;
 
-const modelOptions = ["gpt-image-2", "gpt-image-2-all", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
+const modelOptions = ["gpt-image-2", "gpt-image-2-all", "gpt-image-2-c", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest"];
 const sizeOptions = [
   { value: "1024x1024", label: "1024x1024 · 1K 方图 · 1:1" },
   { value: "1536x1024", label: "1536x1024 · 1K 横图 · 3:2" },

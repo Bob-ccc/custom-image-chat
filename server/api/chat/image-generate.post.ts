@@ -66,6 +66,53 @@ function addOptionalFormParams(form: FormData, body: Record<string, unknown>) {
   if (Number.isFinite(outputCompression)) form.set("output_compression", String(Math.max(0, Math.min(100, Math.round(outputCompression)))));
 }
 
+function addGrokImagePayloadParams(payload: Record<string, unknown>, body: Record<string, unknown>) {
+  for (const key of ["aspect_ratio", "resolution", "response_format"]) {
+    const value = optionalString(body[key]);
+    if (value) payload[key] = value;
+  }
+}
+
+function grokImageInput(source: string) {
+  const url = source.trim();
+  return url ? { url, type: "image_url" } : null;
+}
+
+function grokImageEditPayload(model: string, prompt: string, n: number, body: Record<string, unknown>, imageInputs: string[]) {
+  const images = imageInputs.map(grokImageInput).filter((item): item is { url: string; type: "image_url" } => !!item);
+  const payload: Record<string, unknown> = {
+    model,
+    prompt,
+    n,
+    image: images.length === 1 ? images[0] : images,
+  };
+  addGrokImagePayloadParams(payload, body);
+  return payload;
+}
+
+function upstreamResponsePayload(response: Response, data: unknown, rawText: string) {
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: Object.fromEntries(response.headers.entries()),
+    body: data ?? rawText,
+    rawText,
+  };
+}
+
+function serializeFetchError(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { message: String(error) };
+  const record: Record<string, unknown> = {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+  };
+  const anyError = error as Error & { cause?: unknown; code?: string };
+  if (anyError.code) record.code = anyError.code;
+  if (anyError.cause) record.cause = serializeFetchError(anyError.cause);
+  return record;
+}
+
 export default defineEventHandler(async (event) => {
   const body = (await readBody(event)) || {};
   const mode = String(body.mode || "").trim() as ChatImageMode;
@@ -76,6 +123,7 @@ export default defineEventHandler(async (event) => {
   const quality = normalizeQuality(body.quality);
   const n = toPositiveInt(body.n, 1, 1, 10);
   const b64Json = normalizeB64Json(body.b64_json);
+  const omitImageParams = body.omitImageParams === true || String(body.omitImageParams || "").trim().toLowerCase() === "true";
   const imageInputs = normalizeImageInputs(body);
   const imageSource = imageInputs[0] || "";
   const maskSource = optionalString(body.mask || body.maskImage || body.maskDataUrl);
@@ -96,15 +144,35 @@ export default defineEventHandler(async (event) => {
     let upstream: Response;
     if (mode === "generation") {
       upstreamUrl = buildCustomEndpoint(base, imageEndpoint) || buildEndpoint(base, "/v1/images/generations");
-      const payload: Record<string, unknown> = { model, prompt, size, quality, n };
-      addOptionalPayloadParams(payload, body);
-      if (!hasCustomImageEndpoint) {
+      const payload: Record<string, unknown> = omitImageParams ? { model, prompt, n } : { model, prompt, size, quality, n };
+      if (omitImageParams) addGrokImagePayloadParams(payload, body);
+      if (!omitImageParams) addOptionalPayloadParams(payload, body);
+      if (!omitImageParams && !hasCustomImageEndpoint) {
         payload.b64_json = b64Json;
         if (imageInputs.length) payload.image = imageInputs;
       }
       upstream = await postJson(upstreamUrl, key, payload);
     } else if (mode === "edit") {
       upstreamUrl = buildCustomEndpoint(base, imageEndpoint) || buildEndpoint(base, "/v1/images/edits");
+      if (omitImageParams) {
+        upstream = await postJson(upstreamUrl, key, grokImageEditPayload(model, prompt, n, body, imageInputs));
+        const { data, rawText } = await readUpstreamJson(upstream);
+        const upstreamResponse = upstreamResponsePayload(upstream, data, rawText);
+        if (!upstream.ok) {
+          const isTimeoutStatus = upstream.status === 504;
+          return fail(
+            event,
+            upstream.status,
+            isTimeoutStatus ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+            (isTimeoutStatus
+              ? "图片接口请求超时或上游返回 504，请确认填写的是真实运行 API Base，不是 Apifox 文档地址。"
+              : upstreamErrorMessage(data, rawText, "图片接口请求失败。")) + endpointHint(upstreamUrl),
+            { upstreamStatus: upstream.status, upstreamUrl, upstreamResponse },
+          );
+        }
+        const images = toPreviewImageUrls(extractPreviewUrls(data));
+        return { ok: true, mode, upstreamUrl, upstreamResponse, images, data };
+      }
       const blobs = await Promise.all(imageInputs.map((source) => imageSourceToBlob(source)));
       if (!blobs.length || blobs.some((blob) => !blob)) return fail(event, 400, "BAD_REQUEST", "输入图片必须是可读取的 URL 或 Base64 Data URL。");
       const maskBlob = maskSource ? await imageSourceToBlob(maskSource) : null;
@@ -158,6 +226,7 @@ export default defineEventHandler(async (event) => {
     }
 
     const { data, rawText } = await readUpstreamJson(upstream);
+    const upstreamResponse = upstreamResponsePayload(upstream, data, rawText);
     if (!upstream.ok) {
       const isTimeoutStatus = upstream.status === 504;
       return fail(
@@ -167,7 +236,7 @@ export default defineEventHandler(async (event) => {
         (isTimeoutStatus
           ? "图片接口请求超时或上游返回 504，请确认填写的是真实运行 API Base，不是 Apifox 文档地址。"
           : upstreamErrorMessage(data, rawText, "图片接口请求失败。")) + endpointHint(upstreamUrl),
-        { upstreamStatus: upstream.status, upstreamUrl },
+        { upstreamStatus: upstream.status, upstreamUrl, upstreamResponse },
       );
     }
 
@@ -176,6 +245,7 @@ export default defineEventHandler(async (event) => {
       ok: true,
       mode,
       upstreamUrl,
+      upstreamResponse,
       images,
       data,
     };
@@ -188,7 +258,11 @@ export default defineEventHandler(async (event) => {
       (isAbort
         ? "图片接口请求超时，请确认填写的是真实运行 API Base，不是 Apifox 文档地址。"
         : "图片代理请求失败：" + (error instanceof Error ? error.message : String(error))) + endpointHint(upstreamUrl),
-      upstreamUrl ? { upstreamUrl } : undefined,
+      upstreamUrl ? {
+        upstreamUrl,
+        upstreamResponse: null,
+        upstreamFetchError: serializeFetchError(error),
+      } : undefined,
     );
   }
 });
